@@ -1,0 +1,192 @@
+@import "tailwindcss";
+
+/* Clean Minimal Design System */
+:root {
+  /* Colors - Minimal Palette */
+  --background: 0 0% 4%;
+  /* #09090b */
+  --foreground: 0 0% 98%;
+  /* #fafafa */
+
+  --card: 0 0% 9%;
+  /* #18181b */
+  --card-foreground: 0 0% 98%;
+
+  --popover: 0 0% 9%;
+  --popover-foreground: 0 0% 98%;
+
+  --primary: 217 91% 60%;
+  /* #3b82f6 */
+  --primary-foreground: 0 0% 98%;
+
+  --secondary: 0 0% 15%;
+  /* #262626 */
+  --secondary-foreground: 0 0% 98%;
+
+  --muted: 0 0% 15%;
+  --muted-foreground: 0 0% 45%;
+  /* #737373 */
+
+  --accent: 0 0% 15%;
+  --accent-foreground: 0 0% 98%;
+
+  --destructive: 0 84% 60%;
+  --destructive-foreground: 0 0% 98%;
+
+  --border: 0 0% 15%;
+  /* #262626 */
+  --input: 0 0% 15%;
+  --ring: 217 91% 60%;
+
+  --radius: 8px;
+}
+
+/* Base Styles */
+* {
+  border-color: hsl(var(--border));
+}
+
+body {
+  background-color: hsl(var(--background));
+  color: hsl(var(--foreground));
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Scrollbar - Minimal */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(var(--muted));
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(var(--muted-foreground));
+}
+
+/* Focus */
+*:focus-visible {
+  outline: 2px solid hsl(var(--ring));
+  outline-offset: 2px;
+}
+
+/* Selection */
+::selection {
+  background: hsl(var(--primary) / 0.2);
+}
+
+/* Card - Clean */
+.card {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+}
+
+/* Button - Primary */
+.btn-primary {
+  background: hsl(var(--primary));
+  color: white;
+  font-weight: 500;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  transition: opacity 0.15s ease;
+}
+
+.btn-primary:hover {
+  opacity: 0.9;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Button - Secondary */
+.btn-secondary {
+  background: transparent;
+  color: hsl(var(--foreground));
+  border: 1px solid hsl(var(--border));
+  font-weight: 500;
+  padding: 10px 16px;
+  border-radius: var(--radius);
+  transition: background 0.15s ease;
+}
+
+.btn-secondary:hover {
+  background: hsl(var(--accent));
+}
+
+/* Input */
+.input {
+  width: 100%;
+  padding: 10px 12px;
+  background: hsl(var(--background));
+  border: 1px solid hsl(var(--border));
+  border-radius: var(--radius);
+  color: hsl(var(--foreground));
+  font-size: 14px;
+  transition: border-color 0.15s ease;
+}
+
+.input::placeholder {
+  color: hsl(var(--muted-foreground));
+}
+
+.input:focus {
+  border-color: hsl(var(--primary));
+  outline: none;
+}
+
+/* Animation */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+/* Typography */
+.text-sm {
+  font-size: 14px;
+}
+
+.text-base {
+  font-size: 16px;
+}
+
+.text-lg {
+  font-size: 18px;
+}
+
+.text-xl {
+  font-size: 20px;
+}
+
+.text-2xl {
+  font-size: 24px;
+}
+
+/* Utility */
+.text-muted {
+  color: hsl(var(--muted-foreground));
+}

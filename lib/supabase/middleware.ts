@@ -1,0 +1,78 @@
+import { createServerClient } from '@supabase/ssr';
+import { NextResponse, type NextRequest } from 'next/server';
+
+export async function updateSession(request: NextRequest) {
+    let supabaseResponse = NextResponse.next({
+        request,
+    });
+
+    // Skip auth if Supabase is not configured (demo mode)
+    if (!process.env.NEXT_PUBLIC_SUPABASE_URL || !process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY) {
+        // In demo mode, only allow public routes
+        const publicRoutes = ['/', '/login', '/signup'];
+        const isPublicRoute = publicRoutes.some(
+            (route) => request.nextUrl.pathname === route
+        );
+
+        if (!isPublicRoute && !request.nextUrl.pathname.startsWith('/api')) {
+            const url = request.nextUrl.clone();
+            url.pathname = '/login';
+            return NextResponse.redirect(url);
+        }
+
+        return supabaseResponse;
+    }
+
+    const supabase = createServerClient(
+        process.env.NEXT_PUBLIC_SUPABASE_URL!,
+        process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!,
+        {
+            cookies: {
+                getAll() {
+                    return request.cookies.getAll();
+                },
+                setAll(cookiesToSet) {
+                    cookiesToSet.forEach(({ name, value }) =>
+                        request.cookies.set(name, value)
+                    );
+                    supabaseResponse = NextResponse.next({
+                        request,
+                    });
+                    cookiesToSet.forEach(({ name, value, options }) =>
+                        supabaseResponse.cookies.set(name, value, options)
+                    );
+                },
+            },
+        }
+    );
+
+    // IMPORTANT: Avoid writing any logic between createServerClient and
+    // supabase.auth.getUser(). A simple mistake could make it very hard to debug
+    // issues with users being randomly logged out.
+
+    const {
+        data: { user },
+    } = await supabase.auth.getUser();
+
+    // Define public routes that don't require authentication
+    const publicRoutes = ['/', '/login', '/signup', '/auth/callback'];
+    const isPublicRoute = publicRoutes.some(
+        (route) => request.nextUrl.pathname === route || request.nextUrl.pathname.startsWith('/api/auth')
+    );
+
+    if (!user && !isPublicRoute) {
+        // No user, redirect to login
+        const url = request.nextUrl.clone();
+        url.pathname = '/login';
+        return NextResponse.redirect(url);
+    }
+
+    // Redirect authenticated users away from auth pages
+    if (user && (request.nextUrl.pathname === '/login' || request.nextUrl.pathname === '/signup')) {
+        const url = request.nextUrl.clone();
+        url.pathname = '/dashboard';
+        return NextResponse.redirect(url);
+    }
+
+    return supabaseResponse;
+}
