@@ -12,7 +12,7 @@ const POINTS = [
   { icon: ShieldCheck, title: "Private by default", body: "No cookies, no personal data stored. GDPR-friendly out of the box." },
 ];
 
-export function AuthForm({ mode, action }: { mode: "login" | "signup"; action: (s: FormState, f: FormData) => Promise<FormState> }) {
+export function AuthForm({ mode, action, next = "", email = "", note }: { mode: "login" | "signup"; action: (s: FormState, f: FormData) => Promise<FormState>; next?: string; email?: string; note?: string }) {
   const [state, formAction, pending] = useActionState(action, undefined);
   const signup = mode === "signup";
   return (
@@ -20,9 +20,11 @@ export function AuthForm({ mode, action }: { mode: "login" | "signup"; action: (
       <div className="flex flex-col px-6 py-8 sm:px-12">
         <Link href="/"><Logo /></Link>
         <div className="m-auto w-full max-w-sm py-12">
-          <h1 className="text-2xl font-semibold tracking-tight">{signup ? "Start your 7-day free trial" : "Welcome back"}</h1>
+          <h1 className="text-2xl font-semibold tracking-tight">{signup ? (next ? "Create your account" : "Start your 7-day free trial") : "Welcome back"}</h1>
           <p className="mt-1.5 text-sm text-muted">{signup ? "No credit card required. Set up in under a minute." : "Log in to see what your visitors are up to."}</p>
+          {note && <p className="mt-6 rounded-lg border border-accent/30 bg-accent-soft px-3 py-2 text-sm">{note}</p>}
           <form action={formAction} className="mt-8 space-y-4">
+            <input type="hidden" name="next" value={next} />
             {signup && (
               <div>
                 <label className="label" htmlFor="name">Name</label>
@@ -31,7 +33,7 @@ export function AuthForm({ mode, action }: { mode: "login" | "signup"; action: (
             )}
             <div>
               <label className="label" htmlFor="email">Work email</label>
-              <input className="input h-10" id="email" name="email" type="email" required autoComplete="email" placeholder="you@company.com" />
+              <input className="input h-10" id="email" name="email" type="email" required autoComplete="email" placeholder="you@company.com" defaultValue={email} />
             </div>
             <div>
               <label className="label" htmlFor="password">Password</label>
@@ -41,7 +43,7 @@ export function AuthForm({ mode, action }: { mode: "login" | "signup"; action: (
             <button className="btn h-10 w-full" disabled={pending}>{pending ? "One moment…" : signup ? "Create account" : "Log in"}</button>
           </form>
           <p className="mt-6 text-center text-sm text-muted">
-            {signup ? <>Already have an account? <Link className="font-medium text-accent hover:underline" href="/login">Log in</Link></> : <>New to Waypoint? <Link className="font-medium text-accent hover:underline" href="/signup">Start a free trial</Link></>}
+            {signup ? <>Already have an account? <Link className="font-medium text-accent hover:underline" href={next ? `/login?next=${encodeURIComponent(next)}` : "/login"}>Log in</Link></> : <>New to Waypoint? <Link className="font-medium text-accent hover:underline" href={next ? `/signup?next=${encodeURIComponent(next)}` : "/signup"}>Create an account</Link></>}
           </p>
         </div>
       </div>

@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ChevronsUpDown, LogOut, Plus } from "lucide-react";
+import { ChevronsUpDown, LogOut, Plus, Settings2 } from "lucide-react";
 import { requireUser } from "@/lib/auth.ts";
 import { sql } from "@/lib/db.ts";
 import { logout } from "@/app/actions.ts";
@@ -49,6 +49,7 @@ export async function AppShell({ siteId, children }: { siteId?: string; children
         {switcher}
         {current && <SiteNav siteId={current.id} />}
         <div className="mt-auto space-y-3">
+          <Link href="/settings/team" className="flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-panel/60 hover:text-fg"><Settings2 className="h-4 w-4" /> Team & billing</Link>
           {daysLeft > 0 && (
             <div className="rounded-lg border border-line bg-panel p-3 text-xs">
               <p className="font-medium">Free trial · {daysLeft} day{daysLeft === 1 ? "" : "s"} left</p>

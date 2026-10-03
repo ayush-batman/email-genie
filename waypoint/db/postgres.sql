@@ -107,3 +107,33 @@ CREATE TABLE IF NOT EXISTS email_reports (
   last_sent_at timestamptz,
   PRIMARY KEY (site_id, user_id)
 );
+
+CREATE TABLE IF NOT EXISTS invitations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  email text NOT NULL,
+  role text NOT NULL CHECK (role IN ('admin', 'member', 'viewer')),
+  token_hash text NOT NULL UNIQUE,
+  invited_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  expires_at timestamptz NOT NULL DEFAULT now() + interval '7 days',
+  accepted_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS invitations_org_idx ON invitations(org_id);
+
+CREATE TABLE IF NOT EXISTS audit_log (
+  id bigserial PRIMARY KEY,
+  org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  actor_id uuid REFERENCES users(id) ON DELETE SET NULL,
+  action text NOT NULL,
+  target text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS audit_log_org_idx ON audit_log(org_id, created_at DESC);
+
+-- Billing state (kept in sync by the Stripe webhook).
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS plan text NOT NULL DEFAULT 'trial';
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_customer_id text;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS subscription_status text;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS current_period_end timestamptz;

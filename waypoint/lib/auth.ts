@@ -62,3 +62,22 @@ export async function siteByShareToken(token: string): Promise<Site | null> {
 }
 
 export const canEdit = (role: string) => role === "owner" || role === "admin";
+
+export type OrgAccess = { org: { id: string; name: string; trial_ends_at: Date; plan: string }; role: string; user: CurrentUser };
+
+/** The user's primary organization (first joined) and their role in it. */
+export async function requireOrg(): Promise<OrgAccess> {
+  const user = await requireUser();
+  const [row] = await sql<{ id: string; name: string; trial_ends_at: Date; plan: string; role: string }[]>`
+    SELECT o.id, o.name, o.trial_ends_at, o.plan, m.role FROM organizations o JOIN memberships m ON m.org_id = o.id AND m.user_id = ${user.id}
+    ORDER BY CASE m.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END, o.created_at LIMIT 1`;
+  if (!row) redirect("/sites");
+  const { role, ...org } = row;
+  return { org, role, user };
+}
+
+export async function audit(orgId: string, actorId: string | null, action: string, target = "") {
+  await sql`INSERT INTO audit_log (org_id, actor_id, action, target) VALUES (${orgId}, ${actorId}, ${action}, ${target})`;
+}
+
+export const tokenHash = sha256;

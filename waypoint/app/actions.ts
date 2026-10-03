@@ -4,7 +4,8 @@ import { randomBytes } from "node:crypto";
 import { redirect } from "next/navigation";
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { canEdit, endSession, hashPassword, requireSite, requireUser, startSession, verifyPassword } from "@/lib/auth.ts";
+import { audit, canEdit, endSession, hashPassword, requireOrg, requireSite, requireUser, startSession, tokenHash, verifyPassword } from "@/lib/auth.ts";
+import { esc, layout, sendEmail } from "@/lib/email.ts";
 import { ch, sql } from "@/lib/db.ts";
 import { deleteVisitor } from "@/lib/visitors.ts";
 import { encrypt } from "@/lib/crypto.ts";
@@ -20,17 +21,19 @@ export async function signup(_: FormState, form: FormData): Promise<FormState> {
   const parsed = credentials.extend({ name: z.string().trim().max(100) }).safeParse(Object.fromEntries(form));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const { email, password, name } = parsed.data;
+  const next = safeNext(form.get("next"));
   const hash = await hashPassword(password);
   const userId = await sql.begin(async (tx) => {
     const [u] = await tx<{ id: string }[]>`INSERT INTO users (email, name, password_hash) VALUES (${email}, ${name}, ${hash}) ON CONFLICT (email) DO NOTHING RETURNING id`;
     if (!u) return null;
+    if (next.startsWith("/invite/")) return u.id; // joining someone else's team
     const [o] = await tx<{ id: string }[]>`INSERT INTO organizations (name) VALUES (${name ? `${name}'s team` : "My team"}) RETURNING id`;
     await tx`INSERT INTO memberships (org_id, user_id, role) VALUES (${o!.id}, ${u.id}, 'owner')`;
     return u.id;
   });
   if (!userId) return { error: "An account with this email already exists" };
   await startSession(userId);
-  redirect("/sites/new");
+  redirect(next.startsWith("/invite/") ? next : "/sites/new");
 }
 
 export async function login(_: FormState, form: FormData): Promise<FormState> {
@@ -40,7 +43,13 @@ export async function login(_: FormState, form: FormData): Promise<FormState> {
   // ponytail: no lockout/captcha yet; add rate limiting on this action before public launch.
   if (!u || !(await verifyPassword(parsed.data.password, u.password_hash))) return { error: "Invalid email or password" };
   await startSession(u.id);
-  redirect("/sites");
+  redirect(safeNext(form.get("next")) || "/sites");
+}
+
+/** Only same-site relative paths, so ?next= can't be used as an open redirect. */
+function safeNext(v: FormDataEntryValue | null): string {
+  const s = typeof v === "string" ? v : "";
+  return /^\/(?!\/)[\w\-/?=&.%]*$/.test(s) ? s : "";
 }
 
 export async function logout() {
@@ -71,6 +80,7 @@ export async function createSite(_: FormState, form: FormData): Promise<FormStat
   const [site] = await sql<{ id: string }[]>`
     INSERT INTO sites (org_id, public_id, name, domain, timezone, mode, currency)
     VALUES (${m.org_id}, ${randomBytes(6).toString("base64url")}, ${name}, ${domain}, ${timezone}, ${mode}, ${currency}) RETURNING id`;
+  await audit(m.org_id, user.id, "site.created", domain);
   redirect(`/sites/${site!.id}/settings?welcome=1`);
 }
 
@@ -86,16 +96,18 @@ export async function updateSite(siteId: string, _: FormState, form: FormData): 
 }
 
 export async function toggleSharing(siteId: string) {
-  const { site, role } = await requireSite(siteId);
+  const { site, role, user } = await requireSite(siteId);
   if (!canEdit(role)) return;
   const token = site.share_token ? null : randomBytes(18).toString("base64url");
   await sql`UPDATE sites SET share_token = ${token} WHERE id = ${siteId}`;
+  await audit(site.org_id, user.id, token ? "site.shared" : "site.unshared", site.domain);
   revalidatePath(`/sites/${siteId}/settings`);
 }
 
 export async function deleteSite(siteId: string, form: FormData) {
-  const { site, role } = await requireSite(siteId);
+  const { site, role, user } = await requireSite(siteId);
   if (!canEdit(role) || form.get("confirm") !== site.domain) return;
+  await audit(site.org_id, user.id, "site.deleted", site.domain);
   await ch.command({ query: "ALTER TABLE events DELETE WHERE site_id = {site:UUID}", query_params: { site: siteId } });
   await sql`DELETE FROM sites WHERE id = ${siteId}`;
   redirect("/sites");
@@ -136,7 +148,7 @@ export async function deleteGoal(siteId: string, goalId: string) {
 const PAYMENT_PROVIDERS = ["stripe", "lemonsqueezy", "polar", "paddle"] as const;
 
 export async function saveRevenueConnection(siteId: string, provider: string, _: FormState, form: FormData): Promise<FormState> {
-  const { role } = await requireSite(siteId);
+  const { role, site, user } = await requireSite(siteId);
   if (!canEdit(role)) return { error: "Only owners and admins can connect payments" };
   if (!(PAYMENT_PROVIDERS as readonly string[]).includes(provider)) return { error: "Unknown provider" };
   const secret = String(form.get("secret") ?? "").trim();
@@ -144,6 +156,7 @@ export async function saveRevenueConnection(siteId: string, provider: string, _:
   if (provider === "stripe" && !secret.startsWith("whsec_")) return { error: "Stripe signing secrets start with whsec_" };
   await sql`INSERT INTO revenue_connections (site_id, provider, secret_enc) VALUES (${siteId}, ${provider}, ${encrypt(secret)})
             ON CONFLICT (site_id, provider) DO UPDATE SET secret_enc = EXCLUDED.secret_enc`;
+  await audit(site.org_id, user.id, "revenue.connected", `${provider} · ${site.domain}`);
   revalidatePath(`/sites/${siteId}`, "layout");
   return {};
 }
@@ -157,11 +170,12 @@ export async function removeRevenueConnection(siteId: string, provider: string) 
 
 /** Creates (or rotates) the site's server API key. The key is only ever shown in this response. */
 export async function createRevenueApiKey(siteId: string): Promise<{ key?: string; error?: string }> {
-  const { role } = await requireSite(siteId);
+  const { role, site, user } = await requireSite(siteId);
   if (!canEdit(role)) return { error: "Only owners and admins can create API keys" };
   const key = `wp_sk_${randomBytes(24).toString("base64url")}`;
   await sql`INSERT INTO revenue_connections (site_id, provider, secret_enc) VALUES (${siteId}, 'api', ${encrypt(key)})
             ON CONFLICT (site_id, provider) DO UPDATE SET secret_enc = EXCLUDED.secret_enc, last_event_at = NULL`;
+  await audit(site.org_id, user.id, "revenue.api_key_created", site.domain);
   revalidatePath(`/sites/${siteId}/settings`);
   return { key };
 }
@@ -209,4 +223,84 @@ export async function setDigest(siteId: string, form: FormData) {
     await sql`INSERT INTO email_reports (site_id, user_id, frequency) VALUES (${siteId}, ${user.id}, ${frequency})
               ON CONFLICT (site_id, user_id) DO UPDATE SET frequency = EXCLUDED.frequency`;
   revalidatePath(`/sites/${siteId}/settings`);
+}
+
+// ---------- team ----------
+
+const isManager = (role: string) => role === "owner" || role === "admin";
+
+export async function renameOrg(_: FormState, form: FormData): Promise<FormState> {
+  const { org, role, user } = await requireOrg();
+  if (!isManager(role)) return { error: "Only owners and admins can rename the team" };
+  const name = String(form.get("name") ?? "").trim();
+  if (!name || name.length > 100) return { error: "Enter a team name" };
+  await sql`UPDATE organizations SET name = ${name} WHERE id = ${org.id}`;
+  await audit(org.id, user.id, "team.renamed", name);
+  revalidatePath("/", "layout");
+  return {};
+}
+
+export async function inviteMember(_: FormState, form: FormData): Promise<FormState & { link?: string }> {
+  const { org, role, user } = await requireOrg();
+  if (!isManager(role)) return { error: "Only owners and admins can invite" };
+  const parsed = z.object({ email: z.string().trim().toLowerCase().email("Enter a valid email"), role: z.enum(["admin", "member", "viewer"]) }).safeParse(Object.fromEntries(form));
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message };
+  const { email } = parsed.data;
+  const [already] = await sql`SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.org_id = ${org.id} AND u.email = ${email}`;
+  if (already) return { error: `${email} is already on the team` };
+  const token = randomBytes(24).toString("base64url");
+  await sql`DELETE FROM invitations WHERE org_id = ${org.id} AND email = ${email} AND accepted_at IS NULL`;
+  await sql`INSERT INTO invitations (org_id, email, role, token_hash, invited_by) VALUES (${org.id}, ${email}, ${parsed.data.role}, ${tokenHash(token)}, ${user.id})`;
+  const link = `${process.env.APP_URL ?? ""}/invite/${token}`;
+  await sendEmail({
+    to: email,
+    subject: `${user.name || user.email} invited you to ${org.name} on Waypoint`,
+    html: layout(`Join ${org.name} on Waypoint`, `<p>${esc(user.name || user.email)} invited you to view analytics as <b>${parsed.data.role}</b>. The invitation expires in 7 days.</p>`, { href: link, label: "Accept invitation" }),
+    text: `${user.name || user.email} invited you to ${org.name} on Waypoint. Accept: ${link}`,
+  });
+  await audit(org.id, user.id, "member.invited", `${email} as ${parsed.data.role}`);
+  revalidatePath("/settings/team");
+  return { link };
+}
+
+export async function revokeInvite(inviteId: string) {
+  const { org, role, user } = await requireOrg();
+  if (!isManager(role)) return;
+  const [inv] = await sql<{ email: string }[]>`DELETE FROM invitations WHERE id = ${inviteId} AND org_id = ${org.id} RETURNING email`;
+  if (inv) await audit(org.id, user.id, "invite.revoked", inv.email);
+  revalidatePath("/settings/team");
+}
+
+export async function changeRole(memberId: string, form: FormData) {
+  const { org, role, user } = await requireOrg();
+  const next = String(form.get("role"));
+  if (!isManager(role) || !["admin", "member", "viewer"].includes(next) || memberId === user.id) return;
+  const [m] = await sql<{ email: string }[]>`
+    UPDATE memberships SET role = ${next} FROM users u WHERE memberships.org_id = ${org.id} AND memberships.user_id = ${memberId}
+      AND memberships.role != 'owner' AND u.id = memberships.user_id RETURNING u.email`;
+  if (m) await audit(org.id, user.id, "member.role_changed", `${m.email} → ${next}`);
+  revalidatePath("/settings/team");
+}
+
+export async function removeMember(memberId: string) {
+  const { org, role, user } = await requireOrg();
+  if (!isManager(role) || memberId === user.id) return;
+  const [m] = await sql<{ email: string }[]>`
+    DELETE FROM memberships USING users u WHERE memberships.org_id = ${org.id} AND memberships.user_id = ${memberId}
+      AND memberships.role != 'owner' AND u.id = memberships.user_id RETURNING u.email`;
+  if (m) await audit(org.id, user.id, "member.removed", m.email);
+  revalidatePath("/settings/team");
+}
+
+export async function acceptInvite(token: string) {
+  const user = await requireUser();
+  const [inv] = await sql<{ id: string; org_id: string; role: string; email: string }[]>`
+    SELECT id, org_id, role, email FROM invitations WHERE token_hash = ${tokenHash(token)} AND accepted_at IS NULL AND expires_at > now()`;
+  if (!inv) redirect("/sites");
+  await sql.begin(async (tx) => {
+    await tx`INSERT INTO memberships (org_id, user_id, role) VALUES (${inv.org_id}, ${user.id}, ${inv.role}) ON CONFLICT DO NOTHING`;
+    await tx`UPDATE invitations SET accepted_at = now() WHERE id = ${inv.id}`;
+  });
+  await audit(inv.org_id, user.id, "member.joined", user.email);
+  redirect("/sites");
 }
