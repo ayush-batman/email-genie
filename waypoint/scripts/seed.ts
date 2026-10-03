@@ -81,6 +81,12 @@ const [site] = await sql<{ id: string }[]>`
   VALUES (${org!.id}, 'demo', 'Acme', ${DOMAIN}, 'product', 'America/New_York', 'demo') RETURNING id`;
 for (const [name, kind, match] of [["Signed up", "event", "signup"], ["Purchased", "event", "purchase"], ["Viewed pricing", "pageview", "/pricing"], ["Read the blog", "pageview", "/blog/*"]] as [string, string, string][])
   await sql`INSERT INTO goals (site_id, name, kind, match) VALUES (${site!.id}, ${name}, ${kind}, ${match})`;
+await sql`INSERT INTO funnels (site_id, name, window_hours, steps) VALUES (${site!.id}, 'Pricing → purchase', 168, ${sql.json([
+  { kind: "pageview", match: "/pricing" }, { kind: "pageview", match: "/signup" }, { kind: "event", match: "signup", label: "Signed up" }, { kind: "event", match: "purchase", label: "Purchased" },
+])})`;
+await sql`INSERT INTO funnels (site_id, name, window_hours, steps) VALUES (${site!.id}, 'Docs → install', 24, ${sql.json([
+  { kind: "pageview", match: "/docs" }, { kind: "pageview", match: "/docs/install" }, { kind: "event", match: "copy_snippet", label: "Copied snippet" },
+])})`;
 await sql`INSERT INTO revenue_connections (site_id, provider, secret_enc, last_event_at) VALUES (${site!.id}, 'stripe', ${encrypt("whsec_demo_not_real")}, now())`;
 await ch.command({ query: `ALTER TABLE events DELETE WHERE site_id = '${site!.id}'`, clickhouse_settings: { mutations_sync: "2" } });
 

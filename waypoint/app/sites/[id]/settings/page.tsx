@@ -9,7 +9,8 @@ import { CodeBlock } from "@/components/code-block.tsx";
 import { Tabs } from "@/components/tabs-client.tsx";
 import { PageHeader } from "@/components/shell.tsx";
 import { RevenueSettings } from "@/components/revenue-settings.tsx";
-import { deleteSite, toggleSharing, updateSite } from "../../../actions.ts";
+import { deleteSite, setDigest, toggleSharing, updateSite } from "../../../actions.ts";
+import { sql } from "@/lib/db.ts";
 
 export const metadata = { title: "Settings" };
 
@@ -26,7 +27,8 @@ function Section({ title, description, children, danger }: { title: string; desc
 }
 
 export default async function SettingsPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ welcome?: string }> }) {
-  const { site, role } = await requireSite((await params).id);
+  const { site, role, user } = await requireSite((await params).id);
+  const [digest] = await sql<{ frequency: string }[]>`SELECT frequency FROM email_reports WHERE site_id = ${site.id} AND user_id = ${user.id}`;
   const welcome = (await searchParams).welcome === "1";
   const h = await headers();
   const origin = `${h.get("x-forwarded-proto") ?? "http"}://${h.get("host")}`;
@@ -66,6 +68,16 @@ export default async function SettingsPage({ params, searchParams }: { params: P
       </Section>
 
       <RevenueSettings site={site} origin={origin} editable={editable} Section={Section} />
+
+      <Section title="Email reports" description={<>A summary of visitors, revenue, top sources and pages, sent to {user.email}.</>}>
+        <form action={setDigest.bind(null, site.id)} className="flex flex-wrap items-center gap-2">
+          <select name="frequency" defaultValue={digest?.frequency ?? "off"} className="input w-48" aria-label="Report frequency">
+            <option value="off">Off</option><option value="weekly">Weekly</option><option value="monthly">Monthly</option>
+          </select>
+          <button className="btn-ghost">Save</button>
+          {digest && <span className="chip bg-good-soft text-good">{digest.frequency === "weekly" ? "Every Monday" : "Monthly"}</span>}
+        </form>
+      </Section>
 
       <Section title="Public dashboard" description="A read-only link for investors, clients or your community. CSV export is disabled on shared links.">
         {site.share_token ? <CodeBlock code={`${origin}/share/${site.share_token}`} /> : <p className="text-sm text-muted">Sharing is off.</p>}

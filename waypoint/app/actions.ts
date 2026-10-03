@@ -165,3 +165,48 @@ export async function createRevenueApiKey(siteId: string): Promise<{ key?: strin
   revalidatePath(`/sites/${siteId}/settings`);
   return { key };
 }
+
+const funnelSchema = z.object({
+  name: z.string().trim().min(1, "Name is required").max(100),
+  window_hours: z.coerce.number().int().min(1).max(2160),
+  steps: z
+    .string()
+    .transform((s, ctx) => { try { return JSON.parse(s); } catch { ctx.addIssue({ code: "custom", message: "Invalid steps" }); return z.NEVER; } })
+    .pipe(z.array(z.object({
+      kind: z.enum(["pageview", "event"]),
+      match: z.string().trim().min(1, "Every step needs a page path or event name").max(256),
+      label: z.string().trim().max(80).optional(),
+    })).min(2, "A funnel needs at least two steps").max(10)),
+});
+
+export async function saveFunnel(siteId: string, funnelId: string | null, _: FormState, form: FormData): Promise<FormState> {
+  const { role } = await requireSite(siteId);
+  if (role === "viewer") return { error: "Viewers can't edit funnels" };
+  const parsed = funnelSchema.safeParse(Object.fromEntries(form));
+  if (!parsed.success) return { error: parsed.error.issues[0]?.message };
+  const { name, window_hours, steps } = parsed.data;
+  const bad = steps.find((s) => s.kind === "pageview" && !s.match.startsWith("/"));
+  if (bad) return { error: `Page paths start with / ("${bad.match}")` };
+  let id = funnelId;
+  if (id) await sql`UPDATE funnels SET name = ${name}, window_hours = ${window_hours}, steps = ${sql.json(steps)} WHERE id = ${id} AND site_id = ${siteId}`;
+  else id = (await sql<{ id: string }[]>`INSERT INTO funnels (site_id, name, window_hours, steps) VALUES (${siteId}, ${name}, ${window_hours}, ${sql.json(steps)}) RETURNING id`)[0]!.id;
+  revalidatePath(`/sites/${siteId}/funnels`, "layout");
+  redirect(`/sites/${siteId}/funnels/${id}`);
+}
+
+export async function deleteFunnel(siteId: string, funnelId: string) {
+  const { role } = await requireSite(siteId);
+  if (role === "viewer") return;
+  await sql`DELETE FROM funnels WHERE id = ${funnelId} AND site_id = ${siteId}`;
+  redirect(`/sites/${siteId}/funnels`);
+}
+
+export async function setDigest(siteId: string, form: FormData) {
+  const { user } = await requireSite(siteId);
+  const frequency = String(form.get("frequency"));
+  if (frequency === "off") await sql`DELETE FROM email_reports WHERE site_id = ${siteId} AND user_id = ${user.id}`;
+  else if (frequency === "weekly" || frequency === "monthly")
+    await sql`INSERT INTO email_reports (site_id, user_id, frequency) VALUES (${siteId}, ${user.id}, ${frequency})
+              ON CONFLICT (site_id, user_id) DO UPDATE SET frequency = EXCLUDED.frequency`;
+  revalidatePath(`/sites/${siteId}/settings`);
+}

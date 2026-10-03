@@ -185,3 +185,14 @@ export async function goalStats(s: Scope, goals: Goal[]): Promise<GoalStat[]> {
     return { ...g, visitors, completions: Number(row?.[`c${i}`] ?? 0), rate: total ? visitors / total : 0 };
   });
 }
+
+/** Property keys recorded on an event, most common first. */
+export async function eventPropKeys(s: Scope, event: string): Promise<{ key: string; count: number }[]> {
+  const params: Params = { ev: event };
+  const rows = await chQuery<{ key: string; count: string }>(
+    `SELECT arrayJoin(mapKeys(props)) AS key, count() AS count FROM events WHERE ${where(s, params)} AND type = 'event' AND name = {ev:String}
+     GROUP BY key ORDER BY count DESC LIMIT 30`,
+    params,
+  );
+  return rows.map((r) => ({ key: r.key, count: Number(r.count) }));
+}

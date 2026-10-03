@@ -2,12 +2,13 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Activity, CircleDollarSign, LayoutDashboard, Settings, Target, Users } from "lucide-react";
+import { Activity, CircleDollarSign, Funnel, LayoutDashboard, Settings, Target, Users } from "lucide-react";
 
 const ITEMS = [
   { href: "", label: "Overview", icon: LayoutDashboard },
   { href: "/live", label: "Live", icon: Activity },
   { href: "/visitors", label: "Visitors", icon: Users },
+  { href: "/funnels", label: "Funnels", icon: Funnel },
   { href: "/goals", label: "Goals", icon: Target },
   { href: "/revenue", label: "Revenue", icon: CircleDollarSign },
   { href: "/settings", label: "Settings", icon: Settings },

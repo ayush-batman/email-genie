@@ -87,3 +87,23 @@ CREATE TABLE IF NOT EXISTS revenue_customers (
   user_id text NOT NULL DEFAULT '',
   PRIMARY KEY (site_id, provider, customer_id)
 );
+
+-- Funnels: ordered steps, each a page path (exact or prefix*) or event name.
+CREATE TABLE IF NOT EXISTS funnels (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  steps jsonb NOT NULL,
+  window_hours int NOT NULL DEFAULT 24 CHECK (window_hours BETWEEN 1 AND 2160),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS funnels_site_idx ON funnels(site_id);
+
+-- Weekly/monthly email digests per user and site.
+CREATE TABLE IF NOT EXISTS email_reports (
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  frequency text NOT NULL CHECK (frequency IN ('weekly', 'monthly')),
+  last_sent_at timestamptz,
+  PRIMARY KEY (site_id, user_id)
+);

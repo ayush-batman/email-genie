@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Calendar, ChevronDown, Download, Filter as FilterIcon, Maximize2, Search, Target, X } from "lucide-react";
 import { decodeFilters, DIMENSIONS, encodeFilters, FILTER_OPS, PERIOD_LABELS, PERIODS, type Dimension, type Filter, type Period } from "@/lib/query.ts";
 import { formatYmd, previousRange, resolvePeriod, zonedYmd } from "@/lib/dates.ts";
-import { breakdown, firstEventAt, goalStats, kpis, onlineNow, timeseries, type BreakdownRow, type Goal, type Kpis, type Scope } from "@/lib/stats.ts";
+import { breakdown, eventPropKeys, firstEventAt, goalStats, kpis, onlineNow, timeseries, type BreakdownRow, type Goal, type Kpis, type Scope } from "@/lib/stats.ts";
 import { compact, countryName, duration, flag, money, pct } from "@/lib/format.ts";
 import { sql, type Site } from "@/lib/db.ts";
 import { Chart, type ChartMetric } from "./chart.tsx";
@@ -315,6 +315,8 @@ function Rows({ rows, dim, countLabel, withFilter, revenue, empty = "No data for
 async function Expanded({ scope, dim, sp, href, withFilter, siteId, readOnly, currency }: {
   scope: Scope; dim: Dimension; sp: SP; href: (p: Record<string, string>) => string; withFilter: (f: Filter) => string; siteId: string; readOnly: boolean; currency: string;
 }) {
+  const event = one(sp.event);
+  if (dim === "event" && event) return <EventProps scope={scope} event={event} href={href} currency={currency} />;
   const PAGE = 50;
   const page = Math.max(1, Number(one(sp.page)) || 1);
   const q = one(sp.q);
@@ -333,9 +335,33 @@ async function Expanded({ scope, dim, sp, href, withFilter, siteId, readOnly, cu
         {!readOnly && <a className="btn-ghost" href={`/api/sites/${siteId}/export?${csvQ}`}><Download className="h-4 w-4" /> Export CSV</a>}
       </div>
       <div className="panel p-5"><Rows rows={rows.slice(0, PAGE)} dim={dim} countLabel="Count" withFilter={withFilter} revenue={rows.some((r) => r.revenue) ? currency : null} /></div>
+      {dim === "event" && rows.length > 0 && (
+        <p className="mt-3 text-sm text-muted">Explore properties: {rows.slice(0, 12).map((r, i) => <span key={r.value}>{i > 0 && " · "}<Link className="text-accent hover:underline" href={`${href({ expand: "event" })}&event=${encodeURIComponent(r.value)}`}>{r.value}</Link></span>)}</p>
+      )}
       <div className="mt-4 flex justify-between text-sm">
         {page > 1 ? <Link className="btn-ghost" href={href({ expand: dim, q, page: String(page - 1) })}>← Previous</Link> : <span />}
         {rows.length > PAGE && <Link className="btn-ghost" href={href({ expand: dim, q, page: String(page + 1) })}>Next →</Link>}
+      </div>
+    </main>
+  );
+}
+
+async function EventProps({ scope, event, href, currency }: { scope: Scope; event: string; href: (p: Record<string, string>) => string; currency: string }) {
+  const keys = await eventPropKeys(scope, event);
+  const evScope: Scope = { ...scope, filters: [...scope.filters, { dim: "event", op: "is", value: event }] };
+  const tables = await Promise.all(keys.slice(0, 8).map(async (k) => ({ key: k.key, rows: await breakdown(evScope, `prop:${k.key}`, 10) })));
+  return (
+    <main className="mx-auto max-w-5xl px-4 py-6 sm:px-8">
+      <Link href={href({ expand: "event" })} className="text-sm text-muted hover:text-fg">← All events</Link>
+      <h1 className="mt-4 mb-1 text-xl font-semibold tracking-tight"><span className="rounded-md bg-accent-soft px-2 py-0.5 text-accent">{event}</span> properties</h1>
+      <p className="mb-5 text-sm text-muted">{keys.length ? `${keys.length} propert${keys.length === 1 ? "y" : "ies"} recorded with this event.` : "This event has no properties. Pass them as the second argument to waypoint.track()."}</p>
+      <div className="grid gap-5 md:grid-cols-2">
+        {tables.map((t) => (
+          <section key={t.key} className="panel p-5">
+            <h2 className="mb-3 font-mono text-sm font-semibold">{t.key}</h2>
+            <Rows rows={t.rows} dim={`prop:${t.key}`} countLabel="Events" withFilter={() => "#"} revenue={t.rows.some((r) => r.revenue) ? currency : null} />
+          </section>
+        ))}
       </div>
     </main>
   );
