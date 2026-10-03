@@ -1,68 +1,92 @@
 import { headers } from "next/headers";
+import { CheckCircle2, Link2, Loader2, Trash2 } from "lucide-react";
 import { canEdit, requireSite } from "@/lib/auth.ts";
 import { chQuery } from "@/lib/db.ts";
+import { ago, chDate } from "@/lib/format.ts";
 import { SiteForm } from "@/components/site-form.tsx";
 import { AutoRefresh } from "@/components/auto-refresh.tsx";
+import { CodeBlock } from "@/components/code-block.tsx";
+import { Tabs } from "@/components/tabs-client.tsx";
+import { PageHeader } from "@/components/shell.tsx";
+import { RevenueSettings } from "@/components/revenue-settings.tsx";
 import { deleteSite, toggleSharing, updateSite } from "../../../actions.ts";
 
 export const metadata = { title: "Settings" };
+
+function Section({ title, description, children, danger }: { title: string; description?: React.ReactNode; children: React.ReactNode; danger?: boolean }) {
+  return (
+    <section className={`panel grid gap-6 p-6 md:grid-cols-[240px_1fr] ${danger ? "border-bad/30" : ""}`}>
+      <div>
+        <h2 className={`font-semibold ${danger ? "text-bad" : ""}`}>{title}</h2>
+        {description && <p className="mt-1 text-sm text-muted">{description}</p>}
+      </div>
+      <div className="min-w-0">{children}</div>
+    </section>
+  );
+}
 
 export default async function SettingsPage({ params, searchParams }: { params: Promise<{ id: string }>; searchParams: Promise<{ welcome?: string }> }) {
   const { site, role } = await requireSite((await params).id);
   const welcome = (await searchParams).welcome === "1";
   const h = await headers();
   const origin = `${h.get("x-forwarded-proto") ?? "http"}://${h.get("host")}`;
-  const [last] = await chQuery<{ t: string; n: string }>(
-    `SELECT toString(max(ts)) AS t, count() AS n FROM events WHERE site_id = {site:UUID}`, { site: site.id });
+  const [last] = await chQuery<{ t: string; n: string }>(`SELECT toString(max(ts)) AS t, count() AS n FROM events WHERE site_id = {site:UUID}`, { site: site.id });
   const receiving = Number(last?.n ?? 0) > 0;
   const editable = canEdit(role);
+  const modeAttr = site.mode === "product" ? ` data-mode="product"` : "";
 
-  const snippet = `<script defer src="${origin}/w.js" data-site="${site.public_id}"${site.mode === "product" ? ` data-mode="product"` : ""}></script>`;
-  const nextSnippet = `import Script from "next/script";\n\n// app/layout.tsx, inside <body>\n<Script defer src="${origin}/w.js" data-site="${site.public_id}"${site.mode === "product" ? ` data-mode="product"` : ""} strategy="afterInteractive" />`;
-  const eventsSnippet = `// Custom event with properties\nwaypoint.track("signup", { plan: "pro" });\n\n// Or without JavaScript\n<button data-waypoint-event="cta_click" data-waypoint-prop-location="hero">Start</button>${site.mode === "product" ? `\n\n// Product mode: link visits to your user and pass the visitor id to checkout\nwaypoint.identify(user.id);\nconst visitorId = waypoint.getVisitorId();` : ""}`;
+  const html = `<script defer src="${origin}/w.js" data-site="${site.public_id}"${modeAttr}></script>`;
+  const next = `// app/layout.tsx\nimport Script from "next/script";\n\n<Script src="${origin}/w.js" data-site="${site.public_id}"${modeAttr} strategy="afterInteractive" />`;
+  const gtm = `<!-- Google Tag Manager → New tag → Custom HTML, trigger: All Pages -->\n${html}`;
+  const events = `// Track any action, with optional properties\nwaypoint.track("signup", { plan: "pro" });\n\n// Or declaratively, no JavaScript needed\n<button data-waypoint-event="cta_click" data-waypoint-prop-location="hero">Start</button>`;
+  const identify = `// After login: link this visitor to your user\nwaypoint.identify(user.id);\n\n// At checkout: pass the visitor id so payments are attributed\nconst visitorId = waypoint.getVisitorId();\n// Stripe: metadata: { waypoint_visitor_id: visitorId }`;
 
   return (
-    <main className="mx-auto max-w-3xl space-y-6 px-4 py-8">
+    <main className="mx-auto max-w-[1100px] space-y-5 px-4 py-6 sm:px-8">
       {!receiving && <AutoRefresh ms={3000} />}
-      <section className="panel p-6">
-        <h1 className="text-xl font-semibold">{welcome ? "Install the tracking script" : "Tracking code"}</h1>
-        <p className="mt-1 text-sm text-muted">Paste this into the <code>&lt;head&gt;</code> of every page on {site.domain}. It's under 3 KB and sets no cookies.</p>
-        <Code label="HTML">{snippet}</Code>
-        <details className="mt-3"><summary className="cursor-pointer text-sm text-muted">Next.js</summary><Code label="Next.js">{nextSnippet}</Code></details>
-        <details className="mt-2"><summary className="cursor-pointer text-sm text-muted">Custom events{site.mode === "product" ? " & identify" : ""}</summary><Code label="Events">{eventsSnippet}</Code></details>
-        <div className={`mt-4 rounded-lg border p-3 text-sm ${receiving ? "border-good text-good" : "border-line text-muted"}`} role="status">
-          {receiving ? `✓ Receiving data. Last event ${last!.t} UTC.` : "⏳ Waiting for the first event… this page updates automatically once your site sends data."}
+      <PageHeader title={welcome ? `Install Waypoint on ${site.domain}` : "Settings"} description={welcome ? "Add the snippet, then open your site. This page updates as soon as the first visit arrives." : site.domain} />
+
+      <Section title="Tracking code" description={<>Add to the <code>&lt;head&gt;</code> of every page. Under 3 KB{site.mode === "private" ? ", no cookies" : ""}.</>}>
+        <Tabs items={[
+          { label: "HTML", content: <CodeBlock code={html} /> },
+          { label: "Next.js", content: <CodeBlock code={next} /> },
+          { label: "Tag Manager", content: <CodeBlock code={gtm} /> },
+          { label: "Custom events", content: <CodeBlock code={events} /> },
+          ...(site.mode === "product" ? [{ label: "Identify & checkout", content: <CodeBlock code={identify} /> }] : []),
+        ]} />
+        <div className={`mt-4 flex items-center gap-3 rounded-xl border p-4 text-sm ${receiving ? "border-good/30 bg-good-soft" : "border-line bg-subtle"}`} role="status">
+          {receiving
+            ? <><CheckCircle2 className="h-5 w-5 text-good" /><span><b className="text-good">Receiving data.</b> <span className="text-muted">Last event {ago(chDate(last!.t))}.</span></span></>
+            : <><Loader2 className="h-5 w-5 animate-spin text-muted" /><span><b>Waiting for the first event…</b> <span className="text-muted">Visit {site.domain} after installing.</span></span></>}
         </div>
-      </section>
+      </Section>
 
-      <section className="panel p-6">
-        <h2 className="mb-4 font-semibold">General</h2>
+      <Section title="General" description="Name, domain, reporting timezone and how visitors are identified.">
         {editable ? <SiteForm action={updateSite.bind(null, site.id)} values={site} submit="Save changes" /> : <p className="text-sm text-muted">Only owners and admins can change settings.</p>}
-      </section>
+      </Section>
 
-      <section className="panel p-6">
-        <h2 className="font-semibold">Public dashboard</h2>
-        <p className="mt-1 text-sm text-muted">Anyone with the link can view this site's dashboard (read-only, no CSV export).</p>
-        {site.share_token && <Code label="Share link">{`${origin}/share/${site.share_token}`}</Code>}
-        {editable && <form action={toggleSharing.bind(null, site.id)} className="mt-3"><button className="btn-ghost">{site.share_token ? "Disable public link" : "Create public link"}</button></form>}
-      </section>
+      <RevenueSettings site={site} origin={origin} editable={editable} Section={Section} />
+
+      <Section title="Public dashboard" description="A read-only link for investors, clients or your community. CSV export is disabled on shared links.">
+        {site.share_token ? <CodeBlock code={`${origin}/share/${site.share_token}`} /> : <p className="text-sm text-muted">Sharing is off.</p>}
+        {editable && (
+          <form action={toggleSharing.bind(null, site.id)} className="mt-3">
+            <button className="btn-ghost"><Link2 className="h-4 w-4" /> {site.share_token ? "Disable public link" : "Create public link"}</button>
+          </form>
+        )}
+      </Section>
 
       {editable && (
-        <section className="panel border-bad/40 p-6">
-          <h2 className="font-semibold text-bad">Delete website</h2>
-          <p className="mt-1 text-sm text-muted">Permanently deletes the site and all of its analytics data. Type <b>{site.domain}</b> to confirm.</p>
-          <form action={deleteSite.bind(null, site.id)} className="mt-3 flex gap-2">
-            <input name="confirm" className="input" required pattern={site.domain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} aria-label="Confirm domain" />
-            <button className="btn bg-bad">Delete</button>
+        <Section title="Delete website" description="Permanently deletes this website and all of its data." danger>
+          <form action={deleteSite.bind(null, site.id)} className="space-y-3">
+            <label className="label" htmlFor="confirm">Type <b>{site.domain}</b> to confirm</label>
+            <div className="flex gap-2">
+              <input id="confirm" name="confirm" className="input" required pattern={site.domain.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} />
+              <button className="btn btn-danger"><Trash2 className="h-4 w-4" /> Delete</button>
+            </div>
           </form>
-        </section>
+        </Section>
       )}
     </main>
-  );
-}
-
-function Code({ label, children }: { label: string; children: string }) {
-  return (
-    <pre aria-label={label} className="mt-3 overflow-x-auto rounded-lg bg-bg p-3 text-xs leading-relaxed"><code>{children}</code></pre>
   );
 }

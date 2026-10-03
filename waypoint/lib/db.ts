@@ -27,5 +27,6 @@ export type Site = {
   mode: "private" | "product";
   timezone: string;
   share_token: string | null;
+  currency: string;
   created_at: Date;
 };

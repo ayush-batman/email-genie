@@ -2,13 +2,14 @@
 import { chQuery } from "./db.ts";
 import { DIMENSIONS, type DateRange, type Dimension, type Filter } from "./query.ts";
 
-export type Scope = { siteId: string; tz: string; range: DateRange; filters: Filter[] };
+export type Scope = { siteId: string; tz: string; range: DateRange; filters: Filter[]; currency?: string };
 
 type Params = Record<string, unknown>;
 
 /** WHERE clause for a scope. Column names come from the DIMENSIONS whitelist; values are bound parameters. */
-function where(s: Scope, params: Params): string {
+export function where(s: Scope, params: Params): string {
   params.site = s.siteId;
+  params.cur = s.currency ?? "USD";
   params.from = s.range.from.toISOString();
   params.to = s.range.to.toISOString();
   const parts = ["site_id = {site:UUID}", "ts >= parseDateTime64BestEffort({from:String}, 3)", "ts < parseDateTime64BestEffort({to:String}, 3)"];
@@ -40,15 +41,16 @@ function cond(expr: string, op: Filter["op"], key: string): string {
 
 const SESSIONS = (w: string) => `
   SELECT session_id, any(visitor_id) AS visitor, min(ts) AS start,
-         countIf(type = 'pageview') AS pv, countIf(type = 'event') AS ev,
-         sum(engaged_ms) AS engaged, sum(revenue_minor) AS revenue
+         countIf(type != 'revenue') AS hits, countIf(type = 'pageview') AS pv, countIf(type = 'event') AS ev,
+         sum(engaged_ms) AS engaged, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
   FROM events WHERE ${w} GROUP BY session_id`;
+// Revenue can land in a "session" with no visits in range (renewals, unattributed payments): count its money, not a visit.
 
 const AGGS = `
-  uniqExact(visitor) AS visitors, count() AS visits, sum(pv) AS pageviews,
+  uniqExactIf(visitor, hits > 0) AS visitors, countIf(hits > 0) AS visits, sum(pv) AS pageviews,
   if(visits = 0, 0, pageviews / visits) AS views_per_visit,
-  if(visits = 0, 0, countIf(pv <= 1 AND ev = 0) / visits) AS bounce_rate,
-  if(visits = 0, 0, avg(engaged) / 1000) AS visit_duration,
+  if(visits = 0, 0, countIf(hits > 0 AND pv <= 1 AND ev = 0) / visits) AS bounce_rate,
+  if(visits = 0, 0, avgIf(engaged, hits > 0) / 1000) AS visit_duration,
   sum(ev) AS events, sum(revenue) AS revenue`;
 
 export type Kpis = {
@@ -87,7 +89,7 @@ export async function timeseries(s: Scope): Promise<Point[]> {
   return rows.map(num);
 }
 
-export type BreakdownRow = { value: string; visitors: number; count: number; share: number };
+export type BreakdownRow = { value: string; visitors: number; count: number; share: number; revenue: number };
 
 /** Top values of a dimension. `count` = pageviews for page dims, events for `event`, visits otherwise. */
 export async function breakdown(s: Scope, dim: Dimension | `prop:${string}`, limit = 10, offset = 0, search = ""): Promise<BreakdownRow[]> {
@@ -98,24 +100,25 @@ export async function breakdown(s: Scope, dim: Dimension | `prop:${string}`, lim
 
   if (dim.startsWith("prop:")) {
     params.prop = dim.slice(5);
-    q = `SELECT props[{prop:String}] AS value, uniqExact(visitor_id) AS visitors, count() AS count
+    q = `SELECT props[{prop:String}] AS value, uniqExact(visitor_id) AS visitors, count() AS count, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
          FROM events WHERE ${w} AND type = 'event' AND mapContains(props, {prop:String}) GROUP BY value`;
   } else if (dim === "entry_page" || dim === "exit_page") {
     const pick = dim === "entry_page" ? "argMin" : "argMax";
-    q = `SELECT value, uniqExact(visitor) AS visitors, count() AS count FROM (
-           SELECT session_id, any(visitor_id) AS visitor, ${pick}(url_path, ts) AS value
-           FROM events WHERE ${w} AND type = 'pageview' GROUP BY session_id) GROUP BY value`;
+    q = `SELECT value, uniqExact(visitor) AS visitors, count() AS count, sum(rev) AS revenue FROM (
+           SELECT session_id, any(visitor_id) AS visitor, ${pick}If(url_path, ts, type = 'pageview') AS value, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS rev
+           FROM events WHERE ${w} GROUP BY session_id HAVING countIf(type = 'pageview') > 0) GROUP BY value`;
   } else {
     const col = DIMENSIONS[dim as Dimension].column;
     const pageLike = dim === "page" || dim === "title" || dim === "hostname";
     const typeCond = dim === "event" ? "AND type = 'event'" : pageLike ? "AND type = 'pageview'" : "AND type != 'ping'";
-    const count = dim === "event" || pageLike ? "count()" : "uniqExact(session_id)";
-    q = `SELECT ${col} AS value, uniqExact(visitor_id) AS visitors, ${count} AS count FROM events WHERE ${w} ${typeCond} GROUP BY value`;
+    const count = dim === "event" || pageLike ? "count()" : "uniqExactIf(session_id, type != 'revenue')";
+    q = `SELECT ${col} AS value, uniqExactIf(visitor_id, type != 'revenue') AS visitors, ${count} AS count, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
+         FROM events WHERE ${w} ${typeCond} GROUP BY value`;
   }
   const total = `(SELECT uniqExact(visitor_id) FROM events WHERE ${w})`;
   const rows = await chQuery<BreakdownRow>(
-    `SELECT value, visitors, count, if(${total} = 0, 0, visitors / ${total}) AS share
-     FROM (${q}) WHERE 1 ${searchCond} ORDER BY visitors DESC, count DESC, value LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+    `SELECT value, visitors, count, revenue, if(${total} = 0, 0, visitors / ${total}) AS share
+     FROM (${q}) WHERE visitors > 0 ${searchCond} ORDER BY visitors DESC, count DESC, value LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
     params,
   );
   return rows.map((r) => num(r));
@@ -158,5 +161,27 @@ export async function firstEventAt(siteId: string): Promise<Date | null> {
 export async function exportBreakdown(s: Scope, dim: Dimension | `prop:${string}`): Promise<string> {
   const rows = await breakdown(s, dim, 10_000);
   const esc = (v: string | number) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
-  return ["value,visitors,count,share", ...rows.map((r) => [r.value, r.visitors, r.count, r.share.toFixed(4)].map(esc).join(","))].join("\n");
+  return ["value,visitors,count,share,revenue_minor", ...rows.map((r) => [r.value, r.visitors, r.count, r.share.toFixed(4), r.revenue].map(esc).join(","))].join("\n");
+}
+
+export type Goal = { id: string; name: string; kind: "pageview" | "event"; match: string };
+export type GoalStat = Goal & { visitors: number; completions: number; rate: number };
+
+/** Completions per goal. Pageview goals match a path exactly, or as a prefix when they end in `*`. */
+export async function goalStats(s: Scope, goals: Goal[]): Promise<GoalStat[]> {
+  if (!goals.length) return [];
+  const params: Params = {};
+  const w = where(s, params);
+  const conds = goals.map((g, i) => {
+    params[`g${i}`] = g.match.replace(/\*$/, "");
+    if (g.kind === "event") return `type = 'event' AND name = {g${i}:String}`;
+    return g.match.endsWith("*") ? `type = 'pageview' AND startsWith(url_path, {g${i}:String})` : `type = 'pageview' AND url_path = {g${i}:String}`;
+  });
+  const cols = conds.map((c, i) => `uniqExactIf(visitor_id, ${c}) AS v${i}, countIf(${c}) AS c${i}`).join(", ");
+  const [row] = await chQuery<Record<string, string>>(`SELECT uniqExact(visitor_id) AS total, ${cols} FROM events WHERE ${w}`, params);
+  const total = Number(row?.total ?? 0);
+  return goals.map((g, i) => {
+    const visitors = Number(row?.[`v${i}`] ?? 0);
+    return { ...g, visitors, completions: Number(row?.[`c${i}`] ?? 0), rate: total ? visitors / total : 0 };
+  });
 }

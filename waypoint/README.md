@@ -14,6 +14,9 @@ app/api/e              collection endpoint: validate → bot filter → enrich (
 lib/stats.ts           every analytics query (KPIs, time series, breakdowns, live)
 components/dashboard   server-rendered dashboard: filters, comparisons, panels, CSV export
 app/sites/[id]/live    real-time feed over Server-Sent Events
+lib/visitors.ts        visitor list, profiles, GDPR export/delete
+lib/payments.ts        webhook signature checks + payload parsing (Stripe, Lemon Squeezy, Polar, Paddle)
+lib/revenue.ts         records verified payments with attribution; revenue report queries
 db/*.sql               schemas (idempotent; `npm run migrate`)
 ```
 
@@ -37,12 +40,21 @@ npm test                        # unit tests (node:test)
 
 ```js
 waypoint.track("signup", { plan: "pro" });                  // custom event
-waypoint.track("purchase", {}, { revenue: { amount: 2900, currency: "USD" } });
 <button data-waypoint-event="cta_click" data-waypoint-prop-location="hero">  // no-JS event
 waypoint.identify(user.id); waypoint.getVisitorId();       // Product mode only
 ```
 
 Attributes: `data-mode="product"`, `data-api`, `data-auto-pageview="false"`, `data-outbound="false"`, `data-downloads="false"`, `data-hash="true"`, `data-exclude="/admin/*"`, `data-allow-localhost="true"`, `data-debug="true"`.
+
+## Revenue
+
+Connect a provider under **Settings → Revenue** (webhook URL + signing secret), and pass the visitor at checkout:
+
+```js
+metadata: { waypoint_visitor_id: waypoint.getVisitorId() }   // Stripe / Polar; custom_data for Lemon Squeezy / Paddle
+```
+
+Or report payments from any backend: `POST /api/v1/revenue` with `Authorization: Bearer wp_sk_…` and `{ site_id, amount, currency, order_id, visitor_id | user_id | session_id | customer_id }`.
 
 ## Privacy modes
 

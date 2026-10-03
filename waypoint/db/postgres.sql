@@ -45,3 +45,45 @@ CREATE TABLE IF NOT EXISTS daily_salts (
   day date PRIMARY KEY,
   salt text NOT NULL
 );
+
+ALTER TABLE sites ADD COLUMN IF NOT EXISTS currency text NOT NULL DEFAULT 'USD';
+
+-- A goal is a pageview path (exact, or prefix with trailing *) or a custom event name.
+CREATE TABLE IF NOT EXISTS goals (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  kind text NOT NULL CHECK (kind IN ('pageview', 'event')),
+  match text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS goals_site_idx ON goals(site_id);
+
+-- Payment provider webhooks. Secrets are AES-256-GCM encrypted (lib/crypto.ts).
+CREATE TABLE IF NOT EXISTS revenue_connections (
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  provider text NOT NULL CHECK (provider IN ('stripe', 'lemonsqueezy', 'polar', 'paddle', 'api')),
+  secret_enc text NOT NULL,
+  last_event_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (site_id, provider)
+);
+
+-- Idempotency: each provider event is recorded once.
+CREATE TABLE IF NOT EXISTS revenue_events (
+  provider text NOT NULL,
+  event_id text NOT NULL,
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (provider, event_id)
+);
+
+-- Remembers which visitor a provider customer is, so renewals and refunds without metadata are still attributed.
+CREATE TABLE IF NOT EXISTS revenue_customers (
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  customer_id text NOT NULL,
+  visitor_id text NOT NULL DEFAULT '',
+  user_id text NOT NULL DEFAULT '',
+  PRIMARY KEY (site_id, provider, customer_id)
+);

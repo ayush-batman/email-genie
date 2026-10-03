@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { buildRow, SOURCE_FIELDS, type EventRow } from "../lib/collect.ts";
 import { hashPassword } from "../lib/password.ts";
 import { ch, sql } from "../lib/db.ts";
+import { encrypt } from "../lib/crypto.ts";
 
 
 let seed = 42;
@@ -78,6 +79,9 @@ await sql`INSERT INTO memberships (org_id, user_id, role) VALUES (${org!.id}, ${
 const [site] = await sql<{ id: string }[]>`
   INSERT INTO sites (org_id, public_id, name, domain, mode, timezone, share_token)
   VALUES (${org!.id}, 'demo', 'Acme', ${DOMAIN}, 'product', 'America/New_York', 'demo') RETURNING id`;
+for (const [name, kind, match] of [["Signed up", "event", "signup"], ["Purchased", "event", "purchase"], ["Viewed pricing", "pageview", "/pricing"], ["Read the blog", "pageview", "/blog/*"]] as [string, string, string][])
+  await sql`INSERT INTO goals (site_id, name, kind, match) VALUES (${site!.id}, ${name}, ${kind}, ${match})`;
+await sql`INSERT INTO revenue_connections (site_id, provider, secret_enc, last_event_at) VALUES (${site!.id}, 'stripe', ${encrypt("whsec_demo_not_real")}, now())`;
 await ch.command({ query: `ALTER TABLE events DELETE WHERE site_id = '${site!.id}'`, clickhouse_settings: { mutations_sync: "2" } });
 
 // --- traffic ---
@@ -86,6 +90,7 @@ const rows: EventRow[] = [];
 const returning: { vid: string; ua: string; geo: (typeof GEO)[number][0] }[] = [];
 const now = Date.now();
 let source: Partial<EventRow> = {};
+const payments: { vid: string; sid: string; at: number; amount: number; plan: string; user: string; src: EventRow }[] = [];
 
 for (let d = DAYS; d >= 0; d--) {
   const dayStart = now - d * 86_400_000;
@@ -131,7 +136,8 @@ for (let d = DAYS; d >= 0; d--) {
       if (path === "/dashboard" && rand() < 0.18) {
         const plan = pick([["starter", 5], ["growth", 3], ["business", 1]] as [string, number][]);
         const amount = { starter: 900, growth: 2900, business: 9900 }[plan]!;
-        push({ ...base, t: "event", n: "purchase", u: url, r: "", ti: "", p: { plan }, rev: { a: amount, c: "USD" } });
+        push({ ...base, t: "event", n: "purchase", u: url, r: "", ti: "", p: { plan } });
+        payments.push({ vid, sid, at: t + 20_000, amount, plan, user: identified, src: pv });
       }
       if (rand() < 0.04) push({ ...base, t: "event", n: "outbound_click", u: url, r: "", ti: "", p: { url: "https://github.com/acme/sdk" } });
 
@@ -145,6 +151,27 @@ for (let d = DAYS; d >= 0; d--) {
       Object.assign(rows[k]!, source, { session_id: sid });
     }
   }
+}
+
+// Verified payments (as if from Stripe webhooks): first payment, monthly renewals, a few refunds, some unattributed.
+let order = 0;
+const revenueRow = (base: EventRow, at: number, name: string, amount: number): EventRow => ({
+  ...base, ts: new Date(at).toISOString(), type: "revenue", name, engaged_ms: 0, title: "",
+  props: { provider: "stripe", order_id: `in_${++order}`, plan: base.props.plan ?? "" }, revenue_minor: amount, revenue_currency: "USD",
+});
+for (const p of payments) {
+  const entry = rows.find((r) => r.session_id === p.sid && r.type === "pageview");
+  const base = { ...p.src, ...rows.find((r) => r.session_id === p.sid)!, url_path: entry?.url_path ?? "/", user_id: p.user, props: { plan: p.plan } };
+  rows.push(revenueRow(base, p.at, "payment", p.amount));
+  for (let m = p.at + 30 * 86_400_000; m < now; m += 30 * 86_400_000) {
+    if (rand() < 0.08) break; // churn
+    rows.push(revenueRow(base, m, "renewal", p.amount));
+  }
+  if (rand() < 0.05) rows.push({ ...revenueRow(base, p.at + 3 * 86_400_000, "refund", -p.amount), props: { provider: "stripe", order_id: `in_${order}` } });
+}
+for (let i = 0; i < 6; i++) {
+  const at = now - rand() * 60 * 86_400_000;
+  rows.push(revenueRow({ ...rows[0]!, visitor_id: "", session_id: "", user_id: "", referrer_domain: "", channel: "", utm_source: "", utm_medium: "", utm_campaign: "", utm_term: "", utm_content: "", props: {} }, at, "payment", 2900));
 }
 
 for (let i = 0; i < rows.length; i += 50_000) {
