@@ -137,3 +137,17 @@ ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_customer_id text;
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS stripe_subscription_id text;
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS subscription_status text;
 ALTER TABLE organizations ADD COLUMN IF NOT EXISTS current_period_end timestamptz;
+
+-- Org-scoped read API keys (REST + MCP). Stored as sha256: keys are 192-bit random, so a slow hash adds nothing.
+CREATE TABLE IF NOT EXISTS api_keys (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  org_id uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
+  name text NOT NULL,
+  prefix text NOT NULL,
+  key_hash text NOT NULL UNIQUE,
+  created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  last_used_at timestamptz,
+  revoked_at timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS api_keys_org_idx ON api_keys(org_id);

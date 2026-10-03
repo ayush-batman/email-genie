@@ -304,3 +304,24 @@ export async function acceptInvite(token: string) {
   await audit(inv.org_id, user.id, "member.joined", user.email);
   redirect("/sites");
 }
+
+// ---------- API keys (REST + MCP) ----------
+
+export async function createApiKey(_: { key?: string; error?: string }, form: FormData): Promise<{ key?: string; error?: string }> {
+  const { org, role, user } = await requireOrg();
+  if (!isManager(role)) return { error: "Only owners and admins can create API keys" };
+  const name = String(form.get("name") ?? "").trim().slice(0, 60) || "API key";
+  const key = `wp_live_${randomBytes(24).toString("base64url")}`;
+  await sql`INSERT INTO api_keys (org_id, name, prefix, key_hash, created_by) VALUES (${org.id}, ${name}, ${key.slice(0, 12)}, ${tokenHash(key)}, ${user.id})`;
+  await audit(org.id, user.id, "api_key.created", name);
+  revalidatePath("/settings/api");
+  return { key };
+}
+
+export async function revokeApiKey(id: string) {
+  const { org, role, user } = await requireOrg();
+  if (!isManager(role)) return;
+  const [k] = await sql<{ name: string }[]>`UPDATE api_keys SET revoked_at = now() WHERE id = ${id} AND org_id = ${org.id} AND revoked_at IS NULL RETURNING name`;
+  if (k) await audit(org.id, user.id, "api_key.revoked", k.name);
+  revalidatePath("/settings/api");
+}
