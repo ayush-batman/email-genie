@@ -13,10 +13,10 @@ export async function AppShell({ siteId, children }: { siteId?: string; children
   const user = await requireUser();
   const sites = await sql<SiteItem[]>`
     SELECT s.id, s.name, s.domain FROM sites s JOIN memberships m ON m.org_id = s.org_id AND m.user_id = ${user.id} ORDER BY s.created_at`;
-  const [org] = await sql<{ name: string; trial_ends_at: Date }[]>`
-    SELECT o.name, o.trial_ends_at FROM organizations o JOIN memberships m ON m.org_id = o.id AND m.user_id = ${user.id} ORDER BY o.created_at LIMIT 1`;
+  const [org] = await sql<{ name: string; trial_ends_at: Date; plan: string }[]>`
+    SELECT o.name, o.trial_ends_at, o.plan FROM organizations o JOIN memberships m ON m.org_id = o.id AND m.user_id = ${user.id} ORDER BY o.created_at LIMIT 1`;
   const current = sites.find((s) => s.id === siteId);
-  const daysLeft = org ? Math.ceil((org.trial_ends_at.getTime() - Date.now()) / 86_400_000) : 0;
+  const daysLeft = org?.plan === "trial" ? Math.ceil((org.trial_ends_at.getTime() - Date.now()) / 86_400_000) : 0;
 
   const switcher = (
     <details className="relative">
@@ -51,10 +51,11 @@ export async function AppShell({ siteId, children }: { siteId?: string; children
         <div className="mt-auto space-y-3">
           <Link href="/settings/team" className="flex items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-sm text-muted hover:bg-panel/60 hover:text-fg"><Settings2 className="h-4 w-4" /> Team & billing</Link>
           {daysLeft > 0 && (
-            <div className="rounded-lg border border-line bg-panel p-3 text-xs">
+            <Link href="/settings/billing" className="block rounded-lg border border-line bg-panel p-3 text-xs hover:border-line-strong">
               <p className="font-medium">Free trial · {daysLeft} day{daysLeft === 1 ? "" : "s"} left</p>
               <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-subtle"><div className="h-full rounded-full bg-accent" style={{ width: `${Math.max(8, (daysLeft / 7) * 100)}%` }} /></div>
-            </div>
+              <p className="mt-2 font-medium text-accent">Upgrade →</p>
+            </Link>
           )}
           <div className="flex items-center gap-2 px-1">
             <span className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-accent-soft text-xs font-semibold text-accent">{(user.name || user.email).slice(0, 1).toUpperCase()}</span>

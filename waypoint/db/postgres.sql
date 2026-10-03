@@ -168,3 +168,7 @@ CREATE TABLE IF NOT EXISTS imports (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS imports_site_idx ON imports(site_id);
+
+-- Reminder bookkeeping: which trial/usage emails were already sent.
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS trial_reminder_sent int NOT NULL DEFAULT 0;
+ALTER TABLE organizations ADD COLUMN IF NOT EXISTS usage_alert text NOT NULL DEFAULT '';

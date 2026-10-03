@@ -10,6 +10,8 @@ import { ch, sql } from "@/lib/db.ts";
 import { deleteVisitor } from "@/lib/visitors.ts";
 import { encrypt } from "@/lib/crypto.ts";
 import { deleteImport } from "@/lib/import-job.ts";
+import { billingConfigured, createCheckout, createPortal, limits } from "@/lib/billing.ts";
+import { PAID, priceIdFor, type PlanId } from "@/lib/plans.ts";
 
 export type FormState = { error?: string } | undefined;
 
@@ -77,6 +79,8 @@ export async function createSite(_: FormState, form: FormData): Promise<FormStat
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const [m] = await sql<{ org_id: string }[]>`SELECT org_id FROM memberships WHERE user_id = ${user.id} AND role IN ('owner', 'admin') LIMIT 1`;
   if (!m) return { error: "You need an owner or admin role to add sites" };
+  const lim = await limits(m.org_id);
+  if (lim.sites >= lim.plan.websites) return { error: `Your ${lim.plan.name} plan includes ${lim.plan.websites} websites. Upgrade in Team & billing to add more.` };
   const { name, domain, timezone, mode, currency } = parsed.data;
   const [site] = await sql<{ id: string }[]>`
     INSERT INTO sites (org_id, public_id, name, domain, timezone, mode, currency)
@@ -247,6 +251,8 @@ export async function inviteMember(_: FormState, form: FormData): Promise<FormSt
   const parsed = z.object({ email: z.string().trim().toLowerCase().email("Enter a valid email"), role: z.enum(["admin", "member", "viewer"]) }).safeParse(Object.fromEntries(form));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const { email } = parsed.data;
+  const lim = await limits(org.id);
+  if (lim.members >= lim.plan.members) return { error: `Your ${lim.plan.name} plan includes ${lim.plan.members} team members. Upgrade to invite more.` };
   const [already] = await sql`SELECT 1 FROM memberships m JOIN users u ON u.id = m.user_id WHERE m.org_id = ${org.id} AND u.email = ${email}`;
   if (already) return { error: `${email} is already on the team` };
   const token = randomBytes(24).toString("base64url");
@@ -333,4 +339,22 @@ export async function deleteImportAction(siteId: string, importId: string) {
   await deleteImport(siteId, importId);
   await audit(site.org_id, user.id, "import.deleted", site.domain);
   revalidatePath(`/sites/${siteId}`, "layout");
+}
+
+// ---------- billing ----------
+
+export async function startCheckout(plan: string) {
+  const { org, role, user } = await requireOrg();
+  if (role !== "owner" && role !== "admin") redirect("/settings/billing");
+  if (!billingConfigured() || !PAID.includes(plan as Exclude<PlanId, "trial">) || !priceIdFor(plan as PlanId)) redirect("/settings/billing?error=not_configured");
+  const [o] = await sql<{ id: string; stripe_customer_id: string | null }[]>`SELECT id, stripe_customer_id FROM organizations WHERE id = ${org.id}`;
+  const url = await createCheckout(o!, user.email, priceIdFor(plan as PlanId), process.env.APP_URL ?? "http://localhost:3000");
+  redirect(url);
+}
+
+export async function openBillingPortal() {
+  const { org, role } = await requireOrg();
+  const [o] = await sql<{ stripe_customer_id: string | null }[]>`SELECT stripe_customer_id FROM organizations WHERE id = ${org.id}`;
+  if ((role !== "owner" && role !== "admin") || !o?.stripe_customer_id || !billingConfigured()) redirect("/settings/billing");
+  redirect(await createPortal(o.stripe_customer_id, process.env.APP_URL ?? "http://localhost:3000"));
 }
