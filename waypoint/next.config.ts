@@ -3,6 +3,7 @@ import path from "node:path";
 const config: NextConfig = {
   // Lives inside another repo; pin the root so the parent app is not picked up.
   turbopack: { root: path.resolve(".") },
+  output: "standalone", // self-contained server for the Docker image
   // The tracker is long-cached; bump ?v= in the snippet when it changes.
   async headers() {
     const security = [

@@ -173,14 +173,19 @@ export const DOCS: DocPage[] = [
     ),
   },
   {
-    slug: "self-hosting", section: "Operate", title: "Self-hosting", description: "Run Waypoint on your own infrastructure.",
+    slug: "self-hosting", section: "Operate", title: "Self-hosting", description: "Run Waypoint on your own infrastructure, on one server or several.",
     body: () => (
       <>
-        <P>Waypoint is one Next.js app backed by Postgres (accounts, settings) and ClickHouse (events).</P>
-        <CodeBlock code={`docker compose up -d        # Postgres + ClickHouse\ncp .env.example .env.local  # then fill in secrets\nnpm install && npm run migrate\nnpm run build && npm start`} />
+        <P>Waypoint is one Next.js app backed by Postgres (accounts, settings), ClickHouse (events and a per-visit rollup) and Redis (shared visit state and rate limits).</P>
+        <H>Production stack</H>
+        <CodeBlock code={`cp .env.example .env            # set APP_SECRET, CRON_SECRET, APP_URL, …\ndocker compose -f docker-compose.prod.yml up -d --build\ndocker compose -f docker-compose.prod.yml run --rm app1 node --experimental-strip-types scripts/migrate.ts`} />
+        <P>This runs nginx in front of two app replicas. Any replica can serve any request: visits and rate limits live in Redis, accounts in Postgres. Add replicas by adding services and listing them in <C>deploy/nginx.conf</C>. Each replica buffers incoming events for up to a second and writes them on shutdown, so give containers a stop grace period of a few seconds.</P>
+        <H>Without Docker</H>
+        <CodeBlock code={`docker compose up -d        # Postgres, ClickHouse, Redis for development\ncp .env.example .env.local\nnpm install && npm run migrate\nnpm run build && npm start`} />
         <Table head={["Variable", "Purpose"]} rows={[
           [<C key="a">DATABASE_URL</C>, "Postgres connection string"],
           [<C key="a">CLICKHOUSE_URL / _USER / _PASSWORD / _DB</C>, "ClickHouse connection"],
+          [<C key="a">REDIS_URL</C>, "Required with more than one app instance; optional for a single one"],
           [<C key="a">APP_SECRET</C>, "32+ random characters; encrypts stored payment secrets"],
           [<C key="a">APP_URL</C>, "Public URL, used in emails and Stripe redirects"],
           [<C key="a">CRON_SECRET</C>, <>Protects <C>/api/cron/digests</C>; call it daily</>],
@@ -188,7 +193,7 @@ export const DOCS: DocPage[] = [
           [<C key="a">STRIPE_*</C>, "Billing (optional)"],
           [<C key="a">ANTHROPIC_API_KEY</C>, "Enables the Ask assistant (optional)"],
         ]} />
-        <P>Run it behind a CDN that sets country headers (Cloudflare or Vercel) to get visitor locations. The current build keeps session state in memory, so run a single app instance.</P>
+        <P>Run behind a CDN that sets country headers (Cloudflare or Vercel) to get visitor locations.</P>
       </>
     ),
   },

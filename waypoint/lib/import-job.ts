@@ -54,6 +54,7 @@ async function run(id: string, siteId: string, provider: ImportProvider, files: 
 }
 
 export async function deleteImport(siteId: string, id: string) {
-  await ch.command({ query: "DELETE FROM events WHERE site_id = {site:UUID} AND import_id = {id:String}", query_params: { site: siteId, id } });
+  for (const table of ["events", "sessions"])
+    await ch.command({ query: `ALTER TABLE ${table} DELETE WHERE site_id = {site:UUID} AND import_id = {id:String}`, query_params: { site: siteId, id }, clickhouse_settings: { mutations_sync: "1" } });
   await sql`DELETE FROM imports WHERE id = ${id} AND site_id = ${siteId}`;
 }

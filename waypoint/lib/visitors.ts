@@ -93,9 +93,11 @@ export async function exportVisitor(siteId: string, visitorId: string) {
 export async function deleteVisitor(siteId: string, visitorId: string): Promise<number> {
   const ids = await linkedVisitorIds(siteId, visitorId);
   if (ids.length)
-    await ch.command({
-      query: "DELETE FROM events WHERE site_id = {site:UUID} AND visitor_id IN {ids:Array(String)}",
-      query_params: { site: siteId, ids },
-    });
+    for (const table of ["events", "sessions"])
+      await ch.command({
+        query: `ALTER TABLE ${table} DELETE WHERE site_id = {site:UUID} AND visitor_id IN {ids:Array(String)}`,
+        query_params: { site: siteId, ids },
+        clickhouse_settings: { mutations_sync: "1" },
+      });
   return ids.length;
 }

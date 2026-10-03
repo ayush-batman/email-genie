@@ -20,7 +20,9 @@ Spec: [`../docs/analytics-clone-build-prompt.md`](../docs/analytics-clone-build-
 
 ## Stack
 
-One Next.js app. Postgres for accounts and settings, ClickHouse for events. Dependencies are deliberately few: `postgres`, `@clickhouse/client`, `zod`, `lucide-react`, `@anthropic-ai/sdk` (Ask only). Stripe, Resend and the MCP protocol are spoken over plain HTTP.
+One Next.js app. Postgres for accounts and settings, ClickHouse for events plus a per-visit rollup (`sessions`, kept up to date by a materialized view), Redis for state shared between instances. Dependencies are deliberately few: `postgres`, `@clickhouse/client`, `ioredis`, `zod`, `lucide-react`, `@anthropic-ai/sdk` (Ask only). Stripe, Resend and the MCP protocol are spoken over plain HTTP.
+
+Scale out by running more app instances behind a load balancer (`docker-compose.prod.yml`: nginx → 2 replicas). Visits and rate limits live in Redis, so any instance can serve any request.
 
 ```
 public/w.js              tracker
@@ -39,7 +41,7 @@ e2e/app.test.mjs         browser end-to-end suite
 ## Run locally
 
 ```bash
-docker compose up -d            # Postgres + ClickHouse
+docker compose up -d            # Postgres, ClickHouse, Redis
 cp .env.example .env.local
 npm install
 npm run migrate
@@ -56,5 +58,9 @@ npm run build && npm start      # then, in another terminal:
 npm run e2e                     # browser suite (Playwright)
 npm run bench -- 10000000       # query timings on 10M synthetic events
 ```
+
+Several instances locally: `PORT=3001 npm start`, `PORT=3002 npm start`, then `node scripts/lb.mjs 3000 3001 3002` and `npm run e2e`.
+
+Production: `docker compose -f docker-compose.prod.yml up -d --build`, then run the migration in a container (see `/docs/self-hosting`).
 
 Schedule `GET /api/cron/digests` daily with `Authorization: Bearer $CRON_SECRET`. Optional integrations (Resend, Stripe, Anthropic) are configured in `.env.local`; each feature degrades cleanly without its key.

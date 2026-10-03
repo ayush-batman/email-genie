@@ -39,6 +39,37 @@ function cond(expr: string, op: Filter["op"], key: string): string {
   }
 }
 
+// ---- sessions rollup (fast path) ----
+// Dimensions constant within a visit can be answered from the `sessions` table (one row per visit) instead of raw events.
+const SESSION_DIMS = new Set<Dimension>(["channel", "referrer", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content", "country", "region", "city", "device", "browser", "os", "screen", "language", "entry_page", "exit_page"]);
+const usesRollup = (s: Scope) => s.filters.every((f) => SESSION_DIMS.has(f.dim));
+const rollupCol = (d: Dimension) => (d === "entry_page" ? "x_entry" : d === "exit_page" ? "x_exit" : `x_${DIMENSIONS[d].column}`);
+const rollupExpr = (d: Dimension) => (d === "entry_page" ? "argMinMerge(entry_path)" : d === "exit_page" ? "argMaxMerge(exit_path)" : `any(${DIMENSIONS[d].column})`);
+
+/** One row per visit that started in range, with the requested dimension columns, filtered by the scope's (visit-level) filters. */
+function rollup(s: Scope, params: Params, dims: Dimension[] = []): string {
+  where(s, params); // binds site/from/to/filter params
+  const need = [...new Set([...dims, ...s.filters.map((f) => f.dim)])];
+  const cols = need.map((d) => `, ${rollupExpr(d)} AS ${rollupCol(d)}`).join("");
+  const having = s.filters.map((f, i) => ` AND ${cond(rollupCol(f.dim), f.op, `f${i}`)}`).join("");
+  return `SELECT x_start AS start, x_visitor AS visitor, x_hits AS hits, x_pv AS pv, x_ev AS ev, x_engaged AS engaged, 0 AS revenue${need.map((d) => `, ${rollupCol(d)}`).join("")}
+    FROM (SELECT cityHash64(session_id) AS x_key, min(start) AS x_start, any(visitor_id) AS x_visitor, sum(hits) AS x_hits, sum(pv) AS x_pv, sum(ev) AS x_ev, sum(engaged) AS x_engaged${cols}
+          FROM sessions
+          WHERE site_id = {site:UUID} AND day >= toDate(parseDateTime64BestEffort({from:String}, 3)) - 1 AND day <= toDate(parseDateTime64BestEffort({to:String}, 3))
+          GROUP BY x_key
+          HAVING x_start >= parseDateTime64BestEffort({from:String}, 3) AND x_start < parseDateTime64BestEffort({to:String}, 3)${having})`;
+}
+
+/** Revenue rows matching the scope. Revenue rows carry their visit's source/location columns and its landing page in url_path. */
+function revenueWhere(s: Scope, params: Params): string {
+  const parts = ["site_id = {site:UUID}", "ts >= parseDateTime64BestEffort({from:String}, 3)", "ts < parseDateTime64BestEffort({to:String}, 3)", "type = 'revenue'", "revenue_currency = {cur:String}"];
+  s.filters.forEach((f, i) => {
+    if (f.dim === "exit_page") parts.push(`session_id IN (SELECT session_id FROM sessions WHERE site_id = {site:UUID} GROUP BY session_id HAVING ${cond("argMaxMerge(exit_path)", f.op, `f${i}`)})`);
+    else parts.push(cond(f.dim === "entry_page" ? "url_path" : DIMENSIONS[f.dim].column, f.op, `f${i}`));
+  });
+  return parts.join(" AND ");
+}
+
 const SESSIONS = (w: string) => `
   SELECT session_id, any(visitor_id) AS visitor, min(ts) AS start,
          countIf(type != 'revenue') AS hits, countIf(type = 'pageview') AS pv, countIf(type = 'event') AS ev,
@@ -78,7 +109,7 @@ export async function overview(s: Scope): Promise<{ series: Point[]; totals: Kpi
 }
 
 // Ranges that ended more than a minute ago can't change (except via imports), so cache them briefly.
-// ponytail: in-process cache; a session rollup table is the next step if dashboards on 100M+ event sites need to be faster.
+// ponytail: in-process cache (per instance); fine because finished ranges only change via imports.
 const cache = new Map<string, { at: number; value: Promise<unknown> }>();
 function pastRangeCache<T>(key: unknown[], fn: () => Promise<T>): Promise<T> {
   const s = key[1] as Scope;
@@ -105,16 +136,78 @@ async function overviewQuery(s: Scope): Promise<{ series: Point[]; totals: Kpis 
     week: [`toMonday(toDate(start, {tz:String}))`, `toMonday(toDate(${from}, {tz:String}))`, `toDate(${to}, {tz:String})`, "INTERVAL 1 WEEK"],
     month: [`toStartOfMonth(toDate(start, {tz:String}))`, `toStartOfMonth(toDate(${from}, {tz:String}))`, `toDate(${to}, {tz:String})`, "INTERVAL 1 MONTH"],
   }[s.range.interval];
-  const rs = await ch.query({
-    query: `SELECT ${b[0]} AS bucket, ${AGGS} FROM (${SESSIONS(w)})
-            GROUP BY bucket WITH TOTALS ORDER BY bucket WITH FILL FROM ${b[1]} TO ${b[2]} STEP ${b[3]}`,
-    query_params: params,
-    format: "JSON",
+  const fill = `ORDER BY bucket WITH FILL FROM ${b[1]} TO ${b[2]} STEP ${b[3]}`;
+  const run = async (query: string) => (await ch.query({ query, query_params: params, format: "JSON" })).json<Point>();
+
+  if (!usesRollup(s)) {
+    const res = await run(`SELECT ${b[0]} AS bucket, ${AGGS} FROM (${SESSIONS(w)}) GROUP BY bucket WITH TOTALS ${fill}`);
+    const { bucket: _b, ...kpis } = res.totals ? num(res.totals as Point) : { ...ZERO, bucket: "" };
+    return { series: res.data.map(num), totals: { ...ZERO, ...kpis } };
+  }
+  const r = await rollupStats(s, []);
+  return { series: r.series, totals: r.totals };
+}
+
+const bucketSql = (s: Scope, col: "start" | "ts") => {
+  const t = `toDateTime(${col}, {tz:String})`, d = `toDate(${col}, {tz:String})`;
+  return { minute: `toStartOfMinute(${t})`, hour: `toStartOfHour(${t})`, day: d, week: `toMonday(${d})`, month: `toStartOfMonth(${d})` }[s.range.interval];
+};
+
+/**
+ * Series, totals and top values of several visit-level dimensions from ONE scan of the sessions rollup (GROUPING SETS),
+ * plus revenue from events the same way. Only valid when usesRollup(s).
+ */
+async function rollupStats(s: Scope, dims: Dimension[], limit = 9): Promise<{ series: Point[]; totals: Kpis; panels: Map<Dimension, BreakdownRow[]> }> {
+  const params: Params = { tz: s.tz };
+  const sets = ["(bucket)", "()", ...dims.map((d) => `(${rollupCol(d)})`)].join(", ");
+  // grouping(col) = 0 when col is part of the row's grouping set (SQL standard), which tells the sets apart.
+  const flags = ["bucket", ...dims.map(rollupCol)].map((c) => `, grouping(${c}) AS g_${c}`).join("");
+  const revCol = (d: Dimension) => (d === "entry_page" ? "url_path" : d === "exit_page" ? "'—'" : DIMENSIONS[d].column);
+  const from = "parseDateTime64BestEffort({from:String}, 3)", to = "parseDateTime64BestEffort({to:String}, 3)";
+  const seed = { minute: `toStartOfMinute(toDateTime(${from}, {tz:String}))`, hour: `toStartOfHour(toDateTime(${from}, {tz:String}))`, day: `toDate(${from}, {tz:String})`, week: `toMonday(toDate(${from}, {tz:String}))`, month: `toStartOfMonth(toDate(${from}, {tz:String}))` }[s.range.interval];
+  const end = s.range.interval === "minute" || s.range.interval === "hour" ? `toDateTime(${to}, {tz:String})` : `toDate(${to}, {tz:String})`;
+  const step = { minute: "INTERVAL 1 MINUTE", hour: "INTERVAL 1 HOUR", day: "1", week: "INTERVAL 1 WEEK", month: "INTERVAL 1 MONTH" }[s.range.interval];
+
+  type Row = Record<string, string | number | null>;
+  const [visits, money, buckets] = await Promise.all([
+    chQuery<Row>(
+      `SELECT ${bucketSql(s, "start")} AS bucket${dims.map((d) => `, ${rollupCol(d)}`).join("")}, ${AGGS}
+${flags} FROM (${rollup(s, params, dims)}) GROUP BY GROUPING SETS (${sets})`, params),
+    chQuery<Row>(
+      `SELECT ${bucketSql(s, "ts")} AS bucket${dims.map((d) => `, ${revCol(d)} AS ${rollupCol(d)}`).join("")}, sum(revenue_minor) AS revenue
+${flags} FROM events WHERE ${revenueWhere(s, params)} GROUP BY GROUPING SETS (${sets})`, params),
+    chQuery<{ bucket: string }>(`SELECT ${seed} AS bucket ORDER BY bucket WITH FILL FROM ${seed} TO ${end} STEP ${step}`, params),
+  ]);
+  const keyOf = (r: Row) => (Number(r.g_bucket) === 0 ? "bucket" : dims.find((d) => Number(r[`g_${rollupCol(d)}`]) === 0) ?? "total");
+  const rev = new Map<string, number>(money.map((r) => [`${keyOf(r)}|${keyOf(r) === "bucket" ? r.bucket : keyOf(r) === "total" ? "" : r[rollupCol(keyOf(r) as Dimension)]}`, Number(r.revenue)]));
+  const totalsRow = visits.find((r) => keyOf(r) === "total");
+  const pick = (r: Row | undefined): Kpis => Object.fromEntries((Object.keys(ZERO) as (keyof Kpis)[]).map((k) => [k, Number(r?.[k] ?? 0)])) as Kpis;
+  const totals = { ...pick(totalsRow), revenue: rev.get("total|") ?? 0 };
+  const byBucket = new Map(visits.filter((r) => keyOf(r) === "bucket").map((r) => [String(r.bucket), r]));
+  const series = buckets.map(({ bucket }) => {
+    const r = byBucket.get(String(bucket));
+    return { ...pick(r), bucket: String(bucket), revenue: rev.get(`bucket|${bucket}`) ?? 0 };
   });
-  const res = await rs.json<Point>();
-  const totals = res.totals ? num(res.totals as Point) : { ...ZERO, bucket: "" };
-  const { bucket: _b, ...kpis } = totals;
-  return { series: res.data.map(num), totals: { ...ZERO, ...kpis } };
+  const panels = new Map<Dimension, BreakdownRow[]>();
+  for (const d of dims) {
+    const rows = visits
+      .filter((r) => keyOf(r) === d)
+      .map((r) => ({ value: String(r[rollupCol(d)]), visitors: Number(r.visitors), count: Number(r.visits), revenue: rev.get(`${d}|${r[rollupCol(d)]}`) ?? 0, share: totals.visitors ? Number(r.visitors) / totals.visitors : 0 }))
+      .sort((a, b) => b.visitors - a.visitors || b.count - a.count || a.value.localeCompare(b.value));
+    panels.set(d, rows.slice(0, limit));
+  }
+  return { series, totals, panels };
+}
+
+/** The dashboard's numbers in as few scans as possible: totals, series and the given breakdown panels. */
+export async function dashboardStats(s: Scope, dims: (Dimension | `prop:${string}`)[], limit = 9) {
+  const visitLevel = usesRollup(s) ? (dims.filter((d) => SESSION_DIMS.has(d as Dimension)) as Dimension[]) : [];
+  const main = usesRollup(s)
+    ? pastRangeCache(["dash", s, visitLevel, limit], () => rollupStats(s, visitLevel, limit))
+    : overview(s).then((o) => ({ ...o, panels: new Map<Dimension, BreakdownRow[]>() }));
+  const { series, totals, panels } = await main;
+  const rest = await Promise.all(dims.map((d) => (panels.has(d as Dimension) ? panels.get(d as Dimension)! : breakdown(s, d, limit, 0, "", totals.visitors))));
+  return { series, totals, panels: dims.map((d, i) => ({ dim: d, rows: rest[i]! })) };
 }
 
 export async function timeseries(s: Scope): Promise<Point[]> {
@@ -123,13 +216,31 @@ export async function timeseries(s: Scope): Promise<Point[]> {
 
 export type BreakdownRow = { value: string; visitors: number; count: number; share: number; revenue: number };
 
-/** Top values of a dimension. `count` = pageviews for page dims, events for `event`, visits otherwise. */
 /** Top values of a dimension. `totalVisitors` (for the share column) can be passed in to avoid another scan. */
 export async function breakdown(s: Scope, dim: Dimension | `prop:${string}`, limit = 10, offset = 0, search = "", totalVisitors?: number): Promise<BreakdownRow[]> {
   const params: Params = { limit, offset, search };
   const w = where(s, params);
   const searchCond = search ? "AND positionCaseInsensitive(value, {search:String}) > 0" : "";
   let q: string;
+
+  if (!dim.startsWith("prop:") && SESSION_DIMS.has(dim as Dimension) && usesRollup(s)) {
+    const d = dim as Dimension;
+    const revCol = d === "entry_page" ? "url_path" : d === "exit_page" ? "''" : DIMENSIONS[d].column;
+    const [rows, money, total] = await Promise.all([
+      chQuery<BreakdownRow>(
+        `SELECT ${rollupCol(d)} AS value, uniq(visitor) AS visitors, count() AS count FROM (${rollup(s, params, [d])})
+         GROUP BY value HAVING visitors > 0 ${searchCond} ORDER BY visitors DESC, count DESC, value LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+        params,
+      ),
+      chQuery<{ value: string; revenue: string }>(`SELECT ${revCol} AS value, sum(revenue_minor) AS revenue FROM events WHERE ${revenueWhere(s, params)} GROUP BY value`, params),
+      totalVisitors ?? chQuery<{ n: string }>(`SELECT uniq(visitor) AS n FROM (${rollup(s, params)})`, params).then((r) => Number(r[0]?.n ?? 0)),
+    ]);
+    const rev = new Map(money.map((m) => [m.value, Number(m.revenue)]));
+    return rows.map((r) => {
+      const row = num(r);
+      return { ...row, revenue: rev.get(row.value) ?? 0, share: total ? row.visitors / total : 0 };
+    });
+  }
 
   if (dim.startsWith("prop:")) {
     params.prop = dim.slice(5);

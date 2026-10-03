@@ -1,0 +1,40 @@
+# Production-style stack: nginx → 2 app replicas, plus Postgres, ClickHouse and Redis.
+#   cp .env.example .env   (set APP_SECRET, CRON_SECRET, APP_URL, …)
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml run --rm app1 node --experimental-strip-types scripts/migrate.ts
+x-app: &app
+  build: .
+  env_file: .env
+  environment:
+    DATABASE_URL: postgres://waypoint:waypoint@postgres:5432/waypoint
+    CLICKHOUSE_URL: http://clickhouse:8123
+    REDIS_URL: redis://redis:6379
+  depends_on: [postgres, clickhouse, redis]
+  restart: unless-stopped
+  stop_grace_period: 15s   # lets the ingest buffer flush on SIGTERM
+
+services:
+  app1: *app
+  app2: *app
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["80:80"]
+    volumes: ["./deploy/nginx.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on: [app1, app2]
+    restart: unless-stopped
+  postgres:
+    image: postgres:16
+    environment: { POSTGRES_USER: waypoint, POSTGRES_PASSWORD: waypoint, POSTGRES_DB: waypoint }
+    volumes: [pgdata:/var/lib/postgresql/data]
+    restart: unless-stopped
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    environment: { CLICKHOUSE_USER: waypoint, CLICKHOUSE_PASSWORD: waypoint, CLICKHOUSE_DB: waypoint, CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1" }
+    volumes: [chdata:/var/lib/clickhouse]
+    restart: unless-stopped
+  redis:
+    image: redis:7
+    restart: unless-stopped
+volumes:
+  pgdata: {}
+  chdata: {}

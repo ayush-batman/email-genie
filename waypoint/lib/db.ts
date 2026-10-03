@@ -13,8 +13,8 @@ export const ch = (g.__ch ??= createClient({
   clickhouse_settings: { date_time_input_format: "best_effort" },
 }));
 
-export async function chQuery<T>(query: string, params: Record<string, unknown>): Promise<T[]> {
-  const rs = await ch.query({ query, query_params: params, format: "JSONEachRow" });
+export async function chQuery<T>(query: string, params: Record<string, unknown>, clickhouse_settings?: Record<string, string | number>): Promise<T[]> {
+  const rs = await ch.query({ query, query_params: params, format: "JSONEachRow", clickhouse_settings: clickhouse_settings as never });
   return rs.json<T>();
 }
 

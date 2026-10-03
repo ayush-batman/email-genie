@@ -37,6 +37,9 @@ export default async function SettingsPage({ params, searchParams }: { params: P
   const origin = `${h.get("x-forwarded-proto") ?? "http"}://${h.get("host")}`;
   const [last] = await chQuery<{ t: string; n: string }>(`SELECT toString(max(ts)) AS t, count() AS n FROM events WHERE site_id = {site:UUID}`, { site: site.id });
   const receiving = Number(last?.n ?? 0) > 0;
+  // An import runs on the instance that started it; if that instance restarted, mark it so the user can retry.
+  await sql`UPDATE imports SET status = 'failed', error = 'Interrupted by a server restart. Remove it and import again.'
+            WHERE site_id = ${site.id} AND status = 'running' AND created_at < now() - interval '1 hour'`;
   const imports = await sql<{ id: string; provider: string; status: string; files: string; rows_total: number; rows_imported: number; rows_skipped: number; date_from: Date | null; date_to: Date | null; error: string | null; created_at: Date }[]>`
     SELECT * FROM imports WHERE site_id = ${site.id} ORDER BY created_at DESC LIMIT 20`;
   const importing = imports.some((i) => i.status === "running");

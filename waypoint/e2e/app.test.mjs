@@ -37,7 +37,7 @@ async function loginDemo(page) {
   await page.waitForURL(/\/sites\/[0-9a-f-]+$/);
   return page.url();
 }
-const kpi = (page) => page.locator("a[aria-current] .text-\\[22px\\]").first().innerText();
+const kpi = (page) => page.locator("a[aria-current=true] .text-\\[22px\\]").first().innerText();
 
 before(async () => { browser = await chromium.launch(); });
 after(async () => { await browser.close(); await sql.end(); });
@@ -117,6 +117,16 @@ test("REST and MCP return the same numbers as the dashboard", async () => {
   const call = await rpc("tools/call", { name: "get_overview", arguments: { site_id: "demo", period: "30d" } });
   assert.equal(String(call.result.structuredContent.current.visitors), visitors);
   assert.equal((await fetch(`${B}/api/v1/sites`)).status, 401);
+});
+
+test("filtered dashboard: revenue KPI equals the filtered sources panel", async () => {
+  const page = await newPage();
+  const dash = await loginDemo(page);
+  await page.goto(`${dash}?f=channel:is:AI%20Assistants&metric=revenue`);
+  const kpiRevenue = (await kpi(page)).trim();
+  const panel = await page.locator("section:has(h2:text('Sources')) tbody tr").first().locator("td").last().innerText();
+  assert.notEqual(kpiRevenue, "$0");
+  assert.equal(kpiRevenue, panel.trim());
 });
 
 test("funnels: results, drop-off drilldown and builder validation", async () => {

@@ -24,7 +24,7 @@ const credentials = z.object({
 
 export async function signup(_: FormState, form: FormData): Promise<FormState> {
   const ip = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
-  if (!allow(`signup:${ip}`, 10, 60 * 60_000)) return { error: "Too many signups from this network. Try again later." };
+  if (!(await allow(`signup:${ip}`, 10, 60 * 60_000))) return { error: "Too many signups from this network. Try again later." };
   const parsed = credentials.extend({ name: z.string().trim().max(100) }).safeParse(Object.fromEntries(form));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const { email, password, name } = parsed.data;
@@ -48,10 +48,10 @@ export async function login(_: FormState, form: FormData): Promise<FormState> {
   if (!parsed.success) return { error: "Invalid email or password" };
   const ip = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
   const keys = [`login:${ip}`, `login:${parsed.data.email}`];
-  if (blocked(keys[0]!, 20) || blocked(keys[1]!, 8)) return { error: "Too many failed attempts. Wait 15 minutes or reset your password." };
+  if ((await blocked(keys[0]!, 20)) || (await blocked(keys[1]!, 8))) return { error: "Too many failed attempts. Wait 15 minutes or reset your password." };
   const [u] = await sql<{ id: string; password_hash: string }[]>`SELECT id, password_hash FROM users WHERE email = ${parsed.data.email}`;
   if (!u || !(await verifyPassword(parsed.data.password, u.password_hash))) {
-    for (const k of keys) recordFailure(k, 15 * 60_000);
+    for (const k of keys) await recordFailure(k, 15 * 60_000);
     return { error: "Invalid email or password" };
   }
   await startSession(u.id);
@@ -122,7 +122,7 @@ export async function deleteSite(siteId: string, form: FormData) {
   const { site, role, user } = await requireSite(siteId);
   if (!canEdit(role) || form.get("confirm") !== site.domain) return;
   await audit(site.org_id, user.id, "site.deleted", site.domain);
-  await ch.command({ query: "ALTER TABLE events DELETE WHERE site_id = {site:UUID}", query_params: { site: siteId } });
+  for (const table of ["events", "sessions"]) await ch.command({ query: `ALTER TABLE ${table} DELETE WHERE site_id = {site:UUID}`, query_params: { site: siteId } });
   await sql`DELETE FROM sites WHERE id = ${siteId}`;
   redirect("/sites");
 }
@@ -373,9 +373,9 @@ export async function openBillingPortal() {
 export async function requestPasswordReset(_: FormState, form: FormData): Promise<FormState> {
   const email = String(form.get("email") ?? "").trim().toLowerCase();
   const ip = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
-  if (!allow(`reset:${ip}`, 5, 15 * 60_000)) return { error: "Too many requests. Try again in a few minutes." };
+  if (!(await allow(`reset:${ip}`, 5, 15 * 60_000))) return { error: "Too many requests. Try again in a few minutes." };
   const [u] = await sql<{ id: string }[]>`SELECT id FROM users WHERE email = ${email}`;
-  if (u && allow(`reset:${email}`, 3, 60 * 60_000)) {
+  if (u && (await allow(`reset:${email}`, 3, 60 * 60_000))) {
     const token = randomBytes(32).toString("base64url");
     await sql`INSERT INTO password_resets (token_hash, user_id) VALUES (${tokenHash(token)}, ${u.id})`;
     const link = `${process.env.APP_URL ?? ""}/reset-password/${token}`;

@@ -40,6 +40,6 @@ await time("kpis + filter (channel)", () => kpis({ ...scope, filters: [{ dim: "c
 await time("full overview (parallel)", () => Promise.all([kpis(scope), timeseries(scope), ...(["channel", "page", "country", "device", "event"] as const).map((d) => breakdown(scope, d, 9))]));
 await time("funnel (3 steps)", () => runFunnel(scope, { id: "b", name: "b", window_hours: 24, steps: [{ kind: "pageview", match: "/" }, { kind: "pageview", match: "/pricing" }, { kind: "event", match: "signup" }] }));
 await time("revenue first-touch by channel", () => revenueBy(scope, "channel", "first_touch"));
-if (!process.argv.includes("--keep")) await ch.command({ query: "DELETE FROM events WHERE site_id = {site:UUID}", query_params: { site } });
+if (!process.argv.includes("--keep")) for (const table of ["events", "sessions"]) await ch.command({ query: `ALTER TABLE ${table} DELETE WHERE site_id = {site:UUID}`, query_params: { site } });
 else console.log("kept bench site", site);
 await ch.close();

@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { browserPayloadSchema } from "@/lib/payload.ts";
-import { buildRow, geoFromHeaders, isBot, privateVisitorId, sessionize, type EventRow } from "@/lib/collect.ts";
+import { assignSession, buildRow, geoFromHeaders, isBot, privateVisitorId, type EventRow } from "@/lib/collect.ts";
 import { ch, sql, type Site } from "@/lib/db.ts";
 import { canIngest } from "@/lib/plans.ts";
 import { monthEvents } from "@/lib/billing.ts";
@@ -40,7 +40,7 @@ async function orgCanIngest(orgId: string): Promise<boolean> {
 }
 
 // Events are buffered and written in batches (every second or 5,000 rows), so requests return without waiting on ClickHouse.
-// ponytail: an in-process buffer loses up to ~1s of events if the process crashes; use a queue (Kafka/Redis) if that matters.
+// ponytail: buffered per instance and flushed on SIGTERM; a hard crash can lose up to ~1s of that instance's events.
 const buffer: EventRow[] = [];
 let flushing: Promise<unknown> | null = null;
 function flush() {
@@ -55,7 +55,17 @@ function flush() {
     .finally(() => { flushing = null; });
 }
 const g = globalThis as unknown as { __wpFlush?: ReturnType<typeof setInterval> };
-g.__wpFlush ??= setInterval(flush, 1000);
+if (!g.__wpFlush) {
+  g.__wpFlush = setInterval(flush, 1000);
+  // Write what's buffered before the process exits (deploys, scale-down).
+  for (const sig of ["SIGTERM", "SIGINT"] as const)
+    process.once(sig, async () => {
+      clearInterval(g.__wpFlush);
+      flush();
+      await flushing;
+      process.exit(0);
+    });
+}
 
 const hostAllowed = (host: string, domain: string) => host === domain || host.endsWith("." + domain) || host === "localhost" || host === "127.0.0.1";
 
@@ -87,7 +97,7 @@ export async function POST(req: Request) {
     const visitorId = product ? p.vid! : privateVisitorId(await dailySalt(), site.id, ip, ua);
     const now = new Date();
     const row = buildRow(p, { siteId: site.id, visitorId, ua, geo: geoFromHeaders(req.headers), now, userId: product ? (p.uid ?? "") : "" });
-    sessionize(row, `${site.id}:${visitorId}`, now.getTime(), randomUUID);
+    await assignSession(row, `${site.id}:${visitorId}`, now.getTime(), randomUUID);
     buffer.push(row);
     if (buffer.length >= 5000) flush();
   } catch (err) {

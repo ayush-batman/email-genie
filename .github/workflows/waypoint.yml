@@ -19,6 +19,9 @@ jobs:
         env: { POSTGRES_USER: waypoint, POSTGRES_PASSWORD: waypoint, POSTGRES_DB: waypoint }
         ports: ["5432:5432"]
         options: --health-cmd "pg_isready -U waypoint" --health-interval 5s --health-retries 10
+      redis:
+        image: redis:7
+        ports: ["6379:6379"]
       clickhouse:
         image: clickhouse/clickhouse-server:24.8
         env: { CLICKHOUSE_USER: waypoint, CLICKHOUSE_PASSWORD: waypoint, CLICKHOUSE_DB: waypoint, CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1" }
@@ -38,10 +41,12 @@ jobs:
         run: test "$(gzip -9 -c public/w.js | wc -c)" -lt 3072
       - run: npm run seed
       - run: npx playwright install --with-deps chromium
-      - name: End-to-end
+      - name: End-to-end against two instances behind a load balancer
         run: |
-          npm start > server.log 2>&1 &
-          npx --yes wait-on http://localhost:3000 --timeout 60000
+          PORT=3001 npx next start -p 3001 > server1.log 2>&1 &
+          PORT=3002 npx next start -p 3002 > server2.log 2>&1 &
+          node scripts/lb.mjs 3000 3001 3002 > lb.log 2>&1 &
+          npx --yes wait-on http://localhost:3001 http://localhost:3002 http://localhost:3000 --timeout 60000
           npm run e2e
       - if: failure()
-        run: tail -100 server.log
+        run: tail -60 server1.log server2.log

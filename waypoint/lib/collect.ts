@@ -2,6 +2,7 @@
 import { createHash } from "node:crypto";
 import { classifyChannel, referrerDomain } from "./channels.ts";
 import type { BrowserPayload } from "./payload.ts";
+import { getOrSet, redis } from "./redis.ts";
 
 const BOT_RE = /bot|crawl|spider|slurp|headless|lighthouse|pagespeed|preview|monitor|curl|wget|python|httpclient|axios|go-http|java\/|phantom|puppeteer|playwright|selenium/i;
 
@@ -136,7 +137,7 @@ export function buildRow(
 /**
  * Sessionization: a visit ends after 30 min of inactivity. The first event's source fields
  * (referrer, channel, UTMs) are pinned to the whole session, so internal navigation stays attributed.
- * ponytail: in-process map, so it assumes one app instance; move to Redis when running >1 replica.
+ * In-process version for a single instance; assignSession() below uses Redis when REDIS_URL is set.
  */
 const SESSION_GAP_MS = 30 * 60_000;
 export const SOURCE_FIELDS = ["referrer_domain", "channel", "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content"] as const;
@@ -153,6 +154,16 @@ export function sessionize(row: EventRow, key: string, now: number, newId: () =>
     if (sessions.size > 200_000) for (const [k, v] of sessions) if (now - v.last >= SESSION_GAP_MS) sessions.delete(k);
   }
   s.last = now;
+  row.session_id = s.id;
+  Object.assign(row, s.source);
+}
+
+/** Sessionize through Redis when available (shared by all instances), else in process. */
+export async function assignSession(row: EventRow, key: string, now: number, newId: () => string): Promise<void> {
+  const r = redis();
+  if (!r) return sessionize(row, key, now, newId);
+  const fresh = JSON.stringify({ id: newId(), source: Object.fromEntries(SOURCE_FIELDS.map((f) => [f, row[f]])) });
+  const s = JSON.parse(await getOrSet(r, `wp:sess:${key}`, fresh, SESSION_GAP_MS)) as { id: string; source: Source };
   row.session_id = s.id;
   Object.assign(row, s.source);
 }
