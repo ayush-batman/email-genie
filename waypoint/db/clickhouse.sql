@@ -31,3 +31,5 @@ CREATE TABLE IF NOT EXISTS events (
 ) ENGINE = MergeTree
 PARTITION BY toYYYYMM(ts)
 ORDER BY (site_id, toDate(ts), visitor_id, ts)
+;
+ALTER TABLE events ADD COLUMN IF NOT EXISTS import_id String DEFAULT ''

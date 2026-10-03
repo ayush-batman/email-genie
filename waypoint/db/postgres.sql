@@ -151,3 +151,20 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS api_keys_org_idx ON api_keys(org_id);
+
+CREATE TABLE IF NOT EXISTS imports (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  site_id uuid NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+  provider text NOT NULL,
+  status text NOT NULL DEFAULT 'running' CHECK (status IN ('running', 'done', 'failed')),
+  files text NOT NULL DEFAULT '',
+  rows_total int NOT NULL DEFAULT 0,
+  rows_imported int NOT NULL DEFAULT 0,
+  rows_skipped int NOT NULL DEFAULT 0,
+  date_from timestamptz,
+  date_to timestamptz,
+  error text,
+  created_by uuid REFERENCES users(id) ON DELETE SET NULL,
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS imports_site_idx ON imports(site_id);

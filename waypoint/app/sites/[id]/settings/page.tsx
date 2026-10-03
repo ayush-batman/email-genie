@@ -9,7 +9,10 @@ import { CodeBlock } from "@/components/code-block.tsx";
 import { Tabs } from "@/components/tabs-client.tsx";
 import { PageHeader } from "@/components/shell.tsx";
 import { RevenueSettings } from "@/components/revenue-settings.tsx";
-import { deleteSite, setDigest, toggleSharing, updateSite } from "../../../actions.ts";
+import { deleteImportAction, deleteSite, setDigest, toggleSharing, updateSite } from "../../../actions.ts";
+import { ImportForm } from "@/components/import-form.tsx";
+import { IMPORT_PROVIDERS } from "@/lib/importers.ts";
+import { Download } from "lucide-react";
 import { sql } from "@/lib/db.ts";
 
 export const metadata = { title: "Settings" };
@@ -34,6 +37,9 @@ export default async function SettingsPage({ params, searchParams }: { params: P
   const origin = `${h.get("x-forwarded-proto") ?? "http"}://${h.get("host")}`;
   const [last] = await chQuery<{ t: string; n: string }>(`SELECT toString(max(ts)) AS t, count() AS n FROM events WHERE site_id = {site:UUID}`, { site: site.id });
   const receiving = Number(last?.n ?? 0) > 0;
+  const imports = await sql<{ id: string; provider: string; status: string; files: string; rows_total: number; rows_imported: number; rows_skipped: number; date_from: Date | null; date_to: Date | null; error: string | null; created_at: Date }[]>`
+    SELECT * FROM imports WHERE site_id = ${site.id} ORDER BY created_at DESC LIMIT 20`;
+  const importing = imports.some((i) => i.status === "running");
   const editable = canEdit(role);
   const modeAttr = site.mode === "product" ? ` data-mode="product"` : "";
 
@@ -45,7 +51,7 @@ export default async function SettingsPage({ params, searchParams }: { params: P
 
   return (
     <main className="mx-auto max-w-[1100px] space-y-5 px-4 py-6 sm:px-8">
-      {!receiving && <AutoRefresh ms={3000} />}
+      {(!receiving || importing) && <AutoRefresh ms={3000} />}
       <PageHeader title={welcome ? `Install Waypoint on ${site.domain}` : "Settings"} description={welcome ? "Add the snippet, then open your site. This page updates as soon as the first visit arrives." : site.domain} />
 
       <Section title="Tracking code" description={<>Add to the <code>&lt;head&gt;</code> of every page. Under 3 KB{site.mode === "private" ? ", no cookies" : ""}.</>}>
@@ -86,6 +92,34 @@ export default async function SettingsPage({ params, searchParams }: { params: P
             <button className="btn-ghost"><Link2 className="h-4 w-4" /> {site.share_token ? "Disable public link" : "Create public link"}</button>
           </form>
         )}
+      </Section>
+
+      <Section title="Import history" description="Bring your existing data from Umami, Databuddy or Vercel Analytics. Imported visits appear in every report.">
+        {editable ? <ImportForm siteId={site.id} providers={Object.entries(IMPORT_PROVIDERS).map(([id, p]) => ({ id, ...p }))} /> : <p className="text-sm text-muted">Only owners and admins can import data.</p>}
+        {imports.length > 0 && (
+          <ul className="mt-5 divide-y divide-line rounded-xl border border-line">
+            {imports.map((i) => (
+              <li key={i.id} className="flex flex-wrap items-center gap-3 px-4 py-3 text-sm">
+                <span className={`chip ${i.status === "done" ? "bg-good-soft text-good" : i.status === "failed" ? "bg-bad-soft text-bad" : "bg-warn-soft text-warn"}`}>{i.status === "running" ? "Importing…" : i.status}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="truncate font-medium">{IMPORT_PROVIDERS[i.provider as keyof typeof IMPORT_PROVIDERS]?.name ?? i.provider} · <span className="font-normal text-muted">{i.files}</span></p>
+                  <p className="text-xs text-muted">
+                    {i.error ? i.error : <>{i.rows_imported.toLocaleString()} of {(i.rows_total - i.rows_skipped).toLocaleString()} events{i.rows_skipped ? ` · ${i.rows_skipped.toLocaleString()} skipped (overlap)` : ""}{i.date_from && ` · ${i.date_from.toISOString().slice(0, 10)} → ${i.date_to?.toISOString().slice(0, 10)}`}</>}
+                  </p>
+                  {i.status === "running" && i.rows_total > 0 && <div className="mt-1.5 h-1 max-w-xs overflow-hidden rounded-full bg-subtle"><div className="h-full bg-accent" style={{ width: `${(i.rows_imported / Math.max(1, i.rows_total - i.rows_skipped)) * 100}%` }} /></div>}
+                </div>
+                {editable && i.status !== "running" && <form action={deleteImportAction.bind(null, site.id, i.id)}><button className="text-xs text-muted hover:text-bad">Remove data</button></form>}
+              </li>
+            ))}
+          </ul>
+        )}
+      </Section>
+
+      <Section title="Export all data" description="Every event Waypoint has stored for this site. IP addresses are never stored, so they're never exported.">
+        <div className="flex flex-wrap gap-2">
+          <a className="btn-ghost" href={`/api/sites/${site.id}/export/raw?format=csv`}><Download className="h-4 w-4" /> Download CSV</a>
+          <a className="btn-ghost" href={`/api/sites/${site.id}/export/raw?format=ndjson`}><Download className="h-4 w-4" /> Download NDJSON</a>
+        </div>
       </Section>
 
       {editable && (

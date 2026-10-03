@@ -9,6 +9,7 @@ import { esc, layout, sendEmail } from "@/lib/email.ts";
 import { ch, sql } from "@/lib/db.ts";
 import { deleteVisitor } from "@/lib/visitors.ts";
 import { encrypt } from "@/lib/crypto.ts";
+import { deleteImport } from "@/lib/import-job.ts";
 
 export type FormState = { error?: string } | undefined;
 
@@ -324,4 +325,12 @@ export async function revokeApiKey(id: string) {
   const [k] = await sql<{ name: string }[]>`UPDATE api_keys SET revoked_at = now() WHERE id = ${id} AND org_id = ${org.id} AND revoked_at IS NULL RETURNING name`;
   if (k) await audit(org.id, user.id, "api_key.revoked", k.name);
   revalidatePath("/settings/api");
+}
+
+export async function deleteImportAction(siteId: string, importId: string) {
+  const { role, site, user } = await requireSite(siteId);
+  if (!canEdit(role)) return;
+  await deleteImport(siteId, importId);
+  await audit(site.org_id, user.id, "import.deleted", site.domain);
+  revalidatePath(`/sites/${siteId}`, "layout");
 }
