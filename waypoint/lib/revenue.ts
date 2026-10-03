@@ -104,9 +104,9 @@ export async function revenueSummary(s: Scope): Promise<RevenueSummary> {
        sumIf(revenue_minor, type = 'revenue' AND name = 'renewal' AND revenue_currency = {cur:String}) AS renewals,
        -sumIf(revenue_minor, type = 'revenue' AND name = 'refund' AND revenue_currency = {cur:String}) AS refunds,
        countIf(type = 'revenue' AND name != 'refund' AND revenue_currency = {cur:String}) AS orders,
-       uniqExactIf(visitor_id, type = 'revenue' AND name != 'refund' AND visitor_id != '') AS customers,
+       uniqIf(visitor_id, type = 'revenue' AND name != 'refund' AND visitor_id != '') AS customers,
        sumIf(revenue_minor, type = 'revenue' AND visitor_id = '' AND revenue_currency = {cur:String}) AS unattributed,
-       uniqExactIf(visitor_id, type != 'revenue') AS visitors
+       uniqIf(visitor_id, type != 'revenue') AS visitors
      FROM events WHERE ${w}`,
     params,
   );
@@ -120,7 +120,7 @@ export async function revenueSummary(s: Scope): Promise<RevenueSummary> {
   const [conv] = await chQuery<{ days: string | null; visits: string | null }>(
     `WITH buyers AS (SELECT visitor_id, min(ts) AS paid_at FROM events WHERE ${w} AND type = 'revenue' AND name = 'payment' AND visitor_id != '' GROUP BY visitor_id)
      SELECT avg(dateDiff('second', first_seen, paid_at)) / 86400 AS days, avg(visits) AS visits FROM (
-       SELECT b.visitor_id, any(b.paid_at) AS paid_at, min(e.ts) AS first_seen, uniqExactIf(e.session_id, e.ts <= b.paid_at) AS visits
+       SELECT b.visitor_id, any(b.paid_at) AS paid_at, min(e.ts) AS first_seen, uniqIf(e.session_id, e.ts <= b.paid_at) AS visits
        FROM events e INNER JOIN buyers b ON e.visitor_id = b.visitor_id
        WHERE e.site_id = {site:UUID} AND e.type != 'revenue' GROUP BY b.visitor_id)`,
     params,
@@ -147,14 +147,14 @@ export async function revenueBy(s: Scope, dim: Dimension, model: Attribution, li
   const w = where(s, params);
   const col = DIMENSIONS[dim].column;
   const rev = model === "last_touch"
-    ? `SELECT ${col} AS value, sum(revenue_minor) AS revenue, uniqExactIf(visitor_id, name != 'refund') AS customers, countIf(name != 'refund') AS orders
+    ? `SELECT ${col} AS value, sum(revenue_minor) AS revenue, uniqIf(visitor_id, name != 'refund') AS customers, countIf(name != 'refund') AS orders
        FROM events WHERE ${w} AND type = 'revenue' AND visitor_id != '' AND revenue_currency = {cur:String} GROUP BY value`
-    : `SELECT ft.v AS value, sum(r.revenue_minor) AS revenue, uniqExactIf(r.visitor_id, r.name != 'refund') AS customers, countIf(r.name != 'refund') AS orders
+    : `SELECT ft.v AS value, sum(r.revenue_minor) AS revenue, uniqIf(r.visitor_id, r.name != 'refund') AS customers, countIf(r.name != 'refund') AS orders
        FROM (SELECT visitor_id, revenue_minor, name FROM events WHERE ${w} AND type = 'revenue' AND visitor_id != '' AND revenue_currency = {cur:String}) AS r
        INNER JOIN (SELECT visitor_id, argMin(${col}, ts) AS v FROM events WHERE site_id = {site:UUID} AND type != 'revenue' GROUP BY visitor_id) AS ft
        ON r.visitor_id = ft.visitor_id GROUP BY value`;
   const visitors = model === "last_touch"
-    ? `SELECT ${col} AS value, uniqExact(visitor_id) AS visitors FROM events WHERE ${w} AND type != 'revenue' GROUP BY value`
+    ? `SELECT ${col} AS value, uniq(visitor_id) AS visitors FROM events WHERE ${w} AND type != 'revenue' GROUP BY value`
     : `SELECT v AS value, count() AS visitors FROM (SELECT visitor_id, argMin(${col}, ts) AS v FROM events WHERE ${w} AND type != 'revenue' GROUP BY visitor_id) GROUP BY value`;
   const rows = await chQuery<Record<string, string>>(
     `SELECT r.value AS value, r.revenue AS revenue, r.customers AS customers, r.orders AS orders, v.visitors AS visitors

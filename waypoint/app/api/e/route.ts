@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { browserPayloadSchema } from "@/lib/payload.ts";
-import { buildRow, geoFromHeaders, isBot, privateVisitorId, sessionize } from "@/lib/collect.ts";
+import { buildRow, geoFromHeaders, isBot, privateVisitorId, sessionize, type EventRow } from "@/lib/collect.ts";
 import { ch, sql, type Site } from "@/lib/db.ts";
 import { canIngest } from "@/lib/plans.ts";
 import { monthEvents } from "@/lib/billing.ts";
@@ -39,6 +39,24 @@ async function orgCanIngest(orgId: string): Promise<boolean> {
   return ok;
 }
 
+// Events are buffered and written in batches (every second or 5,000 rows), so requests return without waiting on ClickHouse.
+// ponytail: an in-process buffer loses up to ~1s of events if the process crashes; use a queue (Kafka/Redis) if that matters.
+const buffer: EventRow[] = [];
+let flushing: Promise<unknown> | null = null;
+function flush() {
+  if (flushing || !buffer.length) return;
+  const rows = buffer.splice(0, buffer.length);
+  flushing = ch
+    .insert({ table: "events", values: rows, format: "JSONEachRow" })
+    .catch((err) => {
+      console.error(`collect: insert of ${rows.length} rows failed, retrying next tick`, err);
+      if (buffer.length < 100_000) buffer.unshift(...rows);
+    })
+    .finally(() => { flushing = null; });
+}
+const g = globalThis as unknown as { __wpFlush?: ReturnType<typeof setInterval> };
+g.__wpFlush ??= setInterval(flush, 1000);
+
 const hostAllowed = (host: string, domain: string) => host === domain || host.endsWith("." + domain) || host === "localhost" || host === "127.0.0.1";
 
 export function OPTIONS() {
@@ -70,8 +88,8 @@ export async function POST(req: Request) {
     const now = new Date();
     const row = buildRow(p, { siteId: site.id, visitorId, ua, geo: geoFromHeaders(req.headers), now, userId: product ? (p.uid ?? "") : "" });
     sessionize(row, `${site.id}:${visitorId}`, now.getTime(), randomUUID);
-    // ClickHouse async inserts batch server-side, so no buffering code here.
-    await ch.insert({ table: "events", values: [row], format: "JSONEachRow", clickhouse_settings: { async_insert: 1, wait_for_async_insert: 0 } });
+    buffer.push(row);
+    if (buffer.length >= 5000) flush();
   } catch (err) {
     console.error("collect failed", err);
   }

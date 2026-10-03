@@ -1,0 +1,47 @@
+name: waypoint
+
+on:
+  push:
+    paths: ["waypoint/**", ".github/workflows/waypoint.yml"]
+  pull_request:
+    paths: ["waypoint/**", ".github/workflows/waypoint.yml"]
+
+defaults:
+  run:
+    working-directory: waypoint
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env: { POSTGRES_USER: waypoint, POSTGRES_PASSWORD: waypoint, POSTGRES_DB: waypoint }
+        ports: ["5432:5432"]
+        options: --health-cmd "pg_isready -U waypoint" --health-interval 5s --health-retries 10
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env: { CLICKHOUSE_USER: waypoint, CLICKHOUSE_PASSWORD: waypoint, CLICKHOUSE_DB: waypoint, CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1" }
+        ports: ["8123:8123"]
+        options: --health-cmd "wget -qO- http://localhost:8123/ping" --health-interval 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm, cache-dependency-path: waypoint/package-lock.json }
+      - run: cp .env.example .env.local
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run migrate
+      - run: npm run build
+      - name: Check tracker size (< 3 KB gzipped)
+        run: test "$(gzip -9 -c public/w.js | wc -c)" -lt 3072
+      - run: npm run seed
+      - run: npx playwright install --with-deps chromium
+      - name: End-to-end
+        run: |
+          npm start > server.log 2>&1 &
+          npx --yes wait-on http://localhost:3000 --timeout 60000
+          npm run e2e
+      - if: failure()
+        run: tail -100 server.log

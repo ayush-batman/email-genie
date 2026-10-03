@@ -2,7 +2,7 @@ import Link from "next/link";
 import { ArrowDownRight, ArrowUpRight, Calendar, ChevronDown, Download, Filter as FilterIcon, Maximize2, Search, Target, X } from "lucide-react";
 import { decodeFilters, DIMENSIONS, encodeFilters, FILTER_OPS, PERIOD_LABELS, PERIODS, type Dimension, type Filter, type Period } from "@/lib/query.ts";
 import { formatYmd, previousRange, resolvePeriod, zonedYmd } from "@/lib/dates.ts";
-import { breakdown, eventPropKeys, firstEventAt, goalStats, kpis, onlineNow, timeseries, type BreakdownRow, type Goal, type Kpis, type Scope } from "@/lib/stats.ts";
+import { breakdown, eventPropKeys, firstEventAt, goalStats, onlineNow, overview, type BreakdownRow, type Goal, type Kpis, type Scope } from "@/lib/stats.ts";
 import { compact, countryName, duration, flag, money, pct } from "@/lib/format.ts";
 import { sql, type Site } from "@/lib/db.ts";
 import { Chart, type ChartMetric } from "./chart.tsx";
@@ -70,16 +70,21 @@ export async function Dashboard({ site, sp, basePath, readOnly = false }: { site
   if (expand && expand in DIMENSIONS) return <Expanded scope={scope} dim={expand as Dimension} sp={sp} href={href} withFilter={withFilter} siteId={site.id} readOnly={readOnly} currency={site.currency} />;
 
   const goals = await sql<Goal[]>`SELECT id, name, kind, match FROM goals WHERE site_id = ${site.id} ORDER BY created_at`;
-  const [now, prev, series, prevSeries, online, goalRows, events] = await Promise.all([
-    kpis(scope), kpis(prevScope), timeseries(scope), timeseries(prevScope), onlineNow(site.id), goalStats(scope, goals), breakdown(scope, "event", 8),
-  ]);
-  const panelData = await Promise.all(
-    PANELS.map(async (p) => {
-      const cur = state[p.param as keyof typeof state] as Dimension;
-      const tab = p.tabs.includes(cur) ? cur : p.tabs[0]!;
-      return { ...p, tab, rows: await breakdown(scope, tab, 9) };
+  // Totals first: every panel's "share" uses them, so the panels don't each rescan for it.
+  const [cur, before, online, goalRows] = await Promise.all([overview(scope), overview(prevScope), onlineNow(site.id), goalStats(scope, goals)]);
+  const { totals: now, series } = cur;
+  const { totals: prev, series: prevSeries } = before;
+  const [events, ...panelRows] = await Promise.all([
+    breakdown(scope, "event", 8, 0, "", now.visitors),
+    ...PANELS.map((p) => {
+      const t = state[p.param as keyof typeof state] as Dimension;
+      return breakdown(scope, p.tabs.includes(t) ? t : p.tabs[0]!, 9, 0, "", now.visitors);
     }),
-  );
+  ]);
+  const panelData = PANELS.map((p, i) => {
+    const t = state[p.param as keyof typeof state] as Dimension;
+    return { ...p, tab: p.tabs.includes(t) ? t : p.tabs[0]!, rows: panelRows[i]! };
+  });
   const hasRevenue = now.revenue !== 0 || prev.revenue !== 0;
   const csv = (dim: string) => `/api/sites/${site.id}/export?${new URLSearchParams({ dim, period, from: state.from, to: state.to, f: state.f })}`;
   const metricLabel = KPI_DEFS.find((k) => k.key === metric)!.label;

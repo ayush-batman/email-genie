@@ -84,7 +84,7 @@ export async function dropOff(s: Scope, f: Funnel, step: number): Promise<DropOf
     chQuery<{ visitor_id: string; at: string }>(
       `SELECT visitor_id, toString(fromUnixTimestamp64Milli(${t})) AS at FROM (${inner}) WHERE level = {lvl:UInt8} ORDER BY ${t} DESC LIMIT 30`, params),
     chQuery<{ path: string; visitors: string }>(
-      `SELECT e.url_path AS path, uniqExact(e.visitor_id) AS visitors
+      `SELECT e.url_path AS path, uniq(e.visitor_id) AS visitors
        FROM events e INNER JOIN (SELECT visitor_id, ${t} AS t FROM (${inner}) WHERE level = {lvl:UInt8}) d ON e.visitor_id = d.visitor_id
        WHERE e.site_id = {site:UUID} AND e.type = 'pageview' AND toUnixTimestamp64Milli(e.ts) > d.t
        GROUP BY path ORDER BY visitors DESC LIMIT 8`, params),
@@ -100,7 +100,7 @@ export async function retention(siteId: string, tz: string, weeks = 8): Promise<
     `WITH firsts AS (
        SELECT visitor_id, toMonday(toDate(min(ts), {tz:String})) AS cohort FROM events
        WHERE site_id = {site:UUID} AND type != 'revenue' GROUP BY visitor_id HAVING cohort >= toMonday(today()) - {weeks:UInt8} * 7)
-     SELECT toString(f.cohort) AS week, intDiv(dateDiff('day', f.cohort, toMonday(toDate(e.ts, {tz:String}))), 7) AS k, uniqExact(e.visitor_id) AS n
+     SELECT toString(f.cohort) AS week, intDiv(dateDiff('day', f.cohort, toMonday(toDate(e.ts, {tz:String}))), 7) AS k, uniq(e.visitor_id) AS n
      FROM events e INNER JOIN firsts f ON e.visitor_id = f.visitor_id
      WHERE e.site_id = {site:UUID} AND e.type != 'revenue' AND e.ts >= f.cohort
      GROUP BY week, k ORDER BY week, k`,

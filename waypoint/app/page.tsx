@@ -1,8 +1,7 @@
 import Link from "next/link";
 import Image from "next/image";
 import { Activity, ArrowRight, BarChart3, Bot, CircleDollarSign, Download, EyeOff, Filter, History, Share2, Target, Users } from "lucide-react";
-import { currentUser } from "@/lib/auth.ts";
-import { Logo } from "@/components/logo.tsx";
+import { SiteFooter, SiteHeader } from "@/components/marketing/site-header.tsx";
 
 const FEATURES = [
   { icon: Activity, title: "See live activity", body: "Who's online right now and a real-time stream of every pageview and event.", live: true },
@@ -11,24 +10,15 @@ const FEATURES = [
   { icon: Users, title: "Understand each visitor", body: "Every visit, page and event in one timeline, linked to your users with identify().", live: true },
   { icon: Target, title: "Track what matters", body: "Custom events with properties and goals with conversion rates, from one line of code.", live: true },
   { icon: EyeOff, title: "Analytics without cookies", body: "Private mode stores nothing on the device. Product mode remembers returning visitors when you need it.", live: true },
-  { icon: Filter, title: "Find where people leave", body: "Funnels with step-by-step drop-off and time to convert.", live: false },
-  { icon: Bot, title: "Ask your analytics", body: "An MCP server so Claude, Cursor and other AI tools can answer questions about your traffic.", live: false },
-  { icon: History, title: "Keep your history", body: "Import from Umami, Databuddy and Vercel Analytics.", live: false },
+  { icon: Filter, title: "Find where people leave", body: "Funnels with step-by-step drop-off and time to convert.", live: true },
+  { icon: Bot, title: "Ask your analytics", body: "An MCP server so Claude, Cursor and other AI tools can answer questions about your traffic.", live: true },
+  { icon: History, title: "Keep your history", body: "Import from Umami, Databuddy and Vercel Analytics.", live: true },
 ];
 
-export default async function Landing() {
-  const user = await currentUser();
+export default function Landing() {
   return (
     <div className="overflow-x-hidden">
-      <header className="sticky top-0 z-20 border-b border-line/60 bg-bg/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center gap-6 px-4 py-3 sm:px-8">
-          <Link href="/"><Logo /></Link>
-          <nav className="ml-auto flex items-center gap-2 text-sm sm:gap-4">
-            <Link href="/share/demo" className="hidden text-muted hover:text-fg sm:block">Live demo</Link>
-            {user ? <Link href="/sites" className="btn">Open dashboard</Link> : <><Link href="/login" className="px-2 text-muted hover:text-fg">Log in</Link><Link href="/signup" className="btn">Start free trial</Link></>}
-          </nav>
-        </div>
-      </header>
+      <SiteHeader />
 
       <main>
         <section className="relative">
@@ -96,12 +86,7 @@ export default async function Landing() {
         </section>
       </main>
 
-      <footer className="border-t border-line">
-        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-4 px-4 py-8 text-sm text-muted sm:px-8">
-          <Logo className="text-fg" />
-          <span className="ml-auto">© {new Date().getFullYear()} Waypoint</span>
-        </div>
-      </footer>
+      <SiteFooter />
     </div>
   );
 }

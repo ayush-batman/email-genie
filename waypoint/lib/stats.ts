@@ -1,5 +1,5 @@
 // All analytics queries. Every number in the UI comes from one of these functions.
-import { chQuery } from "./db.ts";
+import { ch, chQuery } from "./db.ts";
 import { DIMENSIONS, type DateRange, type Dimension, type Filter } from "./query.ts";
 
 export type Scope = { siteId: string; tz: string; range: DateRange; filters: Filter[]; currency?: string };
@@ -47,7 +47,7 @@ const SESSIONS = (w: string) => `
 // Revenue can land in a "session" with no visits in range (renewals, unattributed payments): count its money, not a visit.
 
 const AGGS = `
-  uniqExactIf(visitor, hits > 0) AS visitors, countIf(hits > 0) AS visits, sum(pv) AS pageviews,
+  uniqIf(visitor, hits > 0) AS visitors, countIf(hits > 0) AS visits, sum(pv) AS pageviews,
   if(visits = 0, 0, pageviews / visits) AS views_per_visit,
   if(visits = 0, 0, countIf(hits > 0 AND pv <= 1 AND ev = 0) / visits) AS bounce_rate,
   if(visits = 0, 0, avgIf(engaged, hits > 0) / 1000) AS visit_duration,
@@ -60,16 +60,40 @@ export type Kpis = {
 
 const num = <T extends object>(row: T | undefined): T => Object.fromEntries(Object.entries(row ?? {}).map(([k, v]) => [k, typeof v === "string" && k !== "bucket" && k !== "value" ? Number(v) : v])) as T;
 
+/** Range totals. Same query as overview(), so the dashboard, API, MCP and emails always agree. */
 export async function kpis(s: Scope): Promise<Kpis> {
-  const params: Params = {};
-  const [row] = await chQuery<Kpis>(`SELECT ${AGGS} FROM (${SESSIONS(where(s, params))})`, params);
-  return num(row ?? ({ visitors: 0, visits: 0, pageviews: 0, views_per_visit: 0, bounce_rate: 0, visit_duration: 0, events: 0, revenue: 0 } as Kpis));
+  return (await overview(s)).totals;
 }
 
 export type Point = Kpis & { bucket: string };
 
-/** Time series bucketed in the site timezone, gaps filled with zeros. Sessions count toward the bucket they started in. */
-export async function timeseries(s: Scope): Promise<Point[]> {
+const ZERO: Kpis = { visitors: 0, visits: 0, pageviews: 0, views_per_visit: 0, bounce_rate: 0, visit_duration: 0, events: 0, revenue: 0 };
+
+/**
+ * Time series bucketed in the site timezone (gaps filled with zeros) plus range totals, in one query (WITH TOTALS).
+ * Sessions count toward the bucket they started in. Distinct counts use uniq(): exact up to 65k values, ~1% above.
+ */
+export async function overview(s: Scope): Promise<{ series: Point[]; totals: Kpis }> {
+  return pastRangeCache(["overview", s], () => overviewQuery(s));
+}
+
+// Ranges that ended more than a minute ago can't change (except via imports), so cache them briefly.
+// ponytail: in-process cache; a session rollup table is the next step if dashboards on 100M+ event sites need to be faster.
+const cache = new Map<string, { at: number; value: Promise<unknown> }>();
+function pastRangeCache<T>(key: unknown[], fn: () => Promise<T>): Promise<T> {
+  const s = key[1] as Scope;
+  if (s.range.to.getTime() > Date.now() - 60_000) return fn();
+  const k = JSON.stringify(key);
+  const hit = cache.get(k);
+  if (hit && Date.now() - hit.at < 10 * 60_000) return hit.value as Promise<T>;
+  const value = fn();
+  cache.set(k, { at: Date.now(), value });
+  value.catch(() => cache.delete(k));
+  if (cache.size > 2000) cache.delete(cache.keys().next().value!);
+  return value;
+}
+
+async function overviewQuery(s: Scope): Promise<{ series: Point[]; totals: Kpis }> {
   const params: Params = { tz: s.tz };
   const w = where(s, params);
   const from = "parseDateTime64BestEffort({from:String}, 3)";
@@ -81,18 +105,27 @@ export async function timeseries(s: Scope): Promise<Point[]> {
     week: [`toMonday(toDate(start, {tz:String}))`, `toMonday(toDate(${from}, {tz:String}))`, `toDate(${to}, {tz:String})`, "INTERVAL 1 WEEK"],
     month: [`toStartOfMonth(toDate(start, {tz:String}))`, `toStartOfMonth(toDate(${from}, {tz:String}))`, `toDate(${to}, {tz:String})`, "INTERVAL 1 MONTH"],
   }[s.range.interval];
-  const rows = await chQuery<Point>(
-    `SELECT ${b[0]} AS bucket, ${AGGS} FROM (${SESSIONS(w)})
-     GROUP BY bucket ORDER BY bucket WITH FILL FROM ${b[1]} TO ${b[2]} STEP ${b[3]}`,
-    params,
-  );
-  return rows.map(num);
+  const rs = await ch.query({
+    query: `SELECT ${b[0]} AS bucket, ${AGGS} FROM (${SESSIONS(w)})
+            GROUP BY bucket WITH TOTALS ORDER BY bucket WITH FILL FROM ${b[1]} TO ${b[2]} STEP ${b[3]}`,
+    query_params: params,
+    format: "JSON",
+  });
+  const res = await rs.json<Point>();
+  const totals = res.totals ? num(res.totals as Point) : { ...ZERO, bucket: "" };
+  const { bucket: _b, ...kpis } = totals;
+  return { series: res.data.map(num), totals: { ...ZERO, ...kpis } };
+}
+
+export async function timeseries(s: Scope): Promise<Point[]> {
+  return (await overview(s)).series;
 }
 
 export type BreakdownRow = { value: string; visitors: number; count: number; share: number; revenue: number };
 
 /** Top values of a dimension. `count` = pageviews for page dims, events for `event`, visits otherwise. */
-export async function breakdown(s: Scope, dim: Dimension | `prop:${string}`, limit = 10, offset = 0, search = ""): Promise<BreakdownRow[]> {
+/** Top values of a dimension. `totalVisitors` (for the share column) can be passed in to avoid another scan. */
+export async function breakdown(s: Scope, dim: Dimension | `prop:${string}`, limit = 10, offset = 0, search = "", totalVisitors?: number): Promise<BreakdownRow[]> {
   const params: Params = { limit, offset, search };
   const w = where(s, params);
   const searchCond = search ? "AND positionCaseInsensitive(value, {search:String}) > 0" : "";
@@ -100,34 +133,39 @@ export async function breakdown(s: Scope, dim: Dimension | `prop:${string}`, lim
 
   if (dim.startsWith("prop:")) {
     params.prop = dim.slice(5);
-    q = `SELECT props[{prop:String}] AS value, uniqExact(visitor_id) AS visitors, count() AS count, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
+    q = `SELECT props[{prop:String}] AS value, uniq(visitor_id) AS visitors, count() AS count, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
          FROM events WHERE ${w} AND type = 'event' AND mapContains(props, {prop:String}) GROUP BY value`;
   } else if (dim === "entry_page" || dim === "exit_page") {
     const pick = dim === "entry_page" ? "argMin" : "argMax";
-    q = `SELECT value, uniqExact(visitor) AS visitors, count() AS count, sum(rev) AS revenue FROM (
+    q = `SELECT value, uniq(visitor) AS visitors, count() AS count, sum(rev) AS revenue FROM (
            SELECT session_id, any(visitor_id) AS visitor, ${pick}If(url_path, ts, type = 'pageview') AS value, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS rev
            FROM events WHERE ${w} GROUP BY session_id HAVING countIf(type = 'pageview') > 0) GROUP BY value`;
   } else {
     const col = DIMENSIONS[dim as Dimension].column;
     const pageLike = dim === "page" || dim === "title" || dim === "hostname";
     const typeCond = dim === "event" ? "AND type = 'event'" : pageLike ? "AND type = 'pageview'" : "AND type != 'ping'";
-    const count = dim === "event" || pageLike ? "count()" : "uniqExactIf(session_id, type != 'revenue')";
-    q = `SELECT ${col} AS value, uniqExactIf(visitor_id, type != 'revenue') AS visitors, ${count} AS count, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
+    const count = dim === "event" || pageLike ? "count()" : "uniqIf(session_id, type != 'revenue')";
+    q = `SELECT ${col} AS value, uniqIf(visitor_id, type != 'revenue') AS visitors, ${count} AS count, sumIf(revenue_minor, type = 'revenue' AND revenue_currency = {cur:String}) AS revenue
          FROM events WHERE ${w} ${typeCond} GROUP BY value`;
   }
-  const total = `(SELECT uniqExact(visitor_id) FROM events WHERE ${w})`;
-  const rows = await chQuery<BreakdownRow>(
-    `SELECT value, visitors, count, revenue, if(${total} = 0, 0, visitors / ${total}) AS share
-     FROM (${q}) WHERE visitors > 0 ${searchCond} ORDER BY visitors DESC, count DESC, value LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
-    params,
-  );
-  return rows.map((r) => num(r));
+  const [rows, total] = await Promise.all([
+    chQuery<BreakdownRow>(
+      `SELECT value, visitors, count, revenue FROM (${q}) WHERE visitors > 0 ${searchCond}
+       ORDER BY visitors DESC, count DESC, value LIMIT {limit:UInt32} OFFSET {offset:UInt32}`,
+      params,
+    ),
+    totalVisitors ?? chQuery<{ n: string }>(`SELECT uniqIf(visitor_id, type != 'revenue') AS n FROM events WHERE ${w}`, params).then((r) => Number(r[0]?.n ?? 0)),
+  ]);
+  return rows.map((r) => {
+    const row = num(r);
+    return { ...row, share: total ? row.visitors / total : 0 };
+  });
 }
 
 /** Visitors active in the last 5 minutes. */
 export async function onlineNow(siteId: string): Promise<number> {
   const [r] = await chQuery<{ n: string }>(
-    `SELECT uniqExact(visitor_id) AS n FROM events WHERE site_id = {site:UUID} AND ts > now() - INTERVAL 5 MINUTE`,
+    `SELECT uniq(visitor_id) AS n FROM events WHERE site_id = {site:UUID} AND ts > now() - INTERVAL 5 MINUTE`,
     { site: siteId },
   );
   return Number(r?.n ?? 0);
@@ -177,8 +215,8 @@ export async function goalStats(s: Scope, goals: Goal[]): Promise<GoalStat[]> {
     if (g.kind === "event") return `type = 'event' AND name = {g${i}:String}`;
     return g.match.endsWith("*") ? `type = 'pageview' AND startsWith(url_path, {g${i}:String})` : `type = 'pageview' AND url_path = {g${i}:String}`;
   });
-  const cols = conds.map((c, i) => `uniqExactIf(visitor_id, ${c}) AS v${i}, countIf(${c}) AS c${i}`).join(", ");
-  const [row] = await chQuery<Record<string, string>>(`SELECT uniqExact(visitor_id) AS total, ${cols} FROM events WHERE ${w}`, params);
+  const cols = conds.map((c, i) => `uniqIf(visitor_id, ${c}) AS v${i}, countIf(${c}) AS c${i}`).join(", ");
+  const [row] = await chQuery<Record<string, string>>(`SELECT uniq(visitor_id) AS total, ${cols} FROM events WHERE ${w}`, params);
   const total = Number(row?.total ?? 0);
   return goals.map((g, i) => {
     const visitors = Number(row?.[`v${i}`] ?? 0);

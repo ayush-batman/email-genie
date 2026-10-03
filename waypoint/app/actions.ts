@@ -6,6 +6,8 @@ import { revalidatePath } from "next/cache";
 import { z } from "zod";
 import { audit, canEdit, endSession, hashPassword, requireOrg, requireSite, requireUser, startSession, tokenHash, verifyPassword } from "@/lib/auth.ts";
 import { esc, layout, sendEmail } from "@/lib/email.ts";
+import { allow, blocked, recordFailure } from "@/lib/rate-limit.ts";
+import { headers } from "next/headers";
 import { ch, sql } from "@/lib/db.ts";
 import { deleteVisitor } from "@/lib/visitors.ts";
 import { encrypt } from "@/lib/crypto.ts";
@@ -21,6 +23,8 @@ const credentials = z.object({
 });
 
 export async function signup(_: FormState, form: FormData): Promise<FormState> {
+  const ip = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+  if (!allow(`signup:${ip}`, 10, 60 * 60_000)) return { error: "Too many signups from this network. Try again later." };
   const parsed = credentials.extend({ name: z.string().trim().max(100) }).safeParse(Object.fromEntries(form));
   if (!parsed.success) return { error: parsed.error.issues[0]?.message };
   const { email, password, name } = parsed.data;
@@ -42,9 +46,14 @@ export async function signup(_: FormState, form: FormData): Promise<FormState> {
 export async function login(_: FormState, form: FormData): Promise<FormState> {
   const parsed = credentials.safeParse(Object.fromEntries(form));
   if (!parsed.success) return { error: "Invalid email or password" };
+  const ip = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+  const keys = [`login:${ip}`, `login:${parsed.data.email}`];
+  if (blocked(keys[0]!, 20) || blocked(keys[1]!, 8)) return { error: "Too many failed attempts. Wait 15 minutes or reset your password." };
   const [u] = await sql<{ id: string; password_hash: string }[]>`SELECT id, password_hash FROM users WHERE email = ${parsed.data.email}`;
-  // ponytail: no lockout/captcha yet; add rate limiting on this action before public launch.
-  if (!u || !(await verifyPassword(parsed.data.password, u.password_hash))) return { error: "Invalid email or password" };
+  if (!u || !(await verifyPassword(parsed.data.password, u.password_hash))) {
+    for (const k of keys) recordFailure(k, 15 * 60_000);
+    return { error: "Invalid email or password" };
+  }
   await startSession(u.id);
   redirect(safeNext(form.get("next")) || "/sites");
 }
@@ -357,4 +366,32 @@ export async function openBillingPortal() {
   const [o] = await sql<{ stripe_customer_id: string | null }[]>`SELECT stripe_customer_id FROM organizations WHERE id = ${org.id}`;
   if ((role !== "owner" && role !== "admin") || !o?.stripe_customer_id || !billingConfigured()) redirect("/settings/billing");
   redirect(await createPortal(o.stripe_customer_id, process.env.APP_URL ?? "http://localhost:3000"));
+}
+
+// ---------- password reset ----------
+
+export async function requestPasswordReset(_: FormState, form: FormData): Promise<FormState> {
+  const email = String(form.get("email") ?? "").trim().toLowerCase();
+  const ip = (await headers()).get("x-forwarded-for")?.split(",")[0]?.trim() ?? "local";
+  if (!allow(`reset:${ip}`, 5, 15 * 60_000)) return { error: "Too many requests. Try again in a few minutes." };
+  const [u] = await sql<{ id: string }[]>`SELECT id FROM users WHERE email = ${email}`;
+  if (u && allow(`reset:${email}`, 3, 60 * 60_000)) {
+    const token = randomBytes(32).toString("base64url");
+    await sql`INSERT INTO password_resets (token_hash, user_id) VALUES (${tokenHash(token)}, ${u.id})`;
+    const link = `${process.env.APP_URL ?? ""}/reset-password/${token}`;
+    await sendEmail({ to: email, subject: "Reset your Waypoint password", html: layout("Reset your password", "<p>Someone asked to reset the password for this account. The link works for one hour. If it wasn't you, ignore this email.</p>", { href: link, label: "Choose a new password" }), text: `Reset your password: ${link}` });
+  }
+  return {}; // same answer whether or not the account exists
+}
+
+export async function resetPassword(token: string, _: FormState, form: FormData): Promise<FormState> {
+  const password = String(form.get("password") ?? "");
+  if (password.length < 8 || password.length > 200) return { error: "Password must be at least 8 characters" };
+  const [r] = await sql<{ user_id: string }[]>`
+    UPDATE password_resets SET used_at = now() WHERE token_hash = ${tokenHash(token)} AND used_at IS NULL AND expires_at > now() RETURNING user_id`;
+  if (!r) return { error: "This reset link has expired or was already used. Request a new one." };
+  await sql`UPDATE users SET password_hash = ${await hashPassword(password)} WHERE id = ${r.user_id}`;
+  await sql`DELETE FROM auth_sessions WHERE user_id = ${r.user_id}`; // sign out everywhere
+  await startSession(r.user_id);
+  redirect("/sites");
 }

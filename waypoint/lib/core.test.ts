@@ -86,3 +86,13 @@ test("filters round-trip through the URL and reject unknown dims", () => {
   assert.deepEqual(decodeFilters(encodeFilters(f)), f);
   assert.deepEqual(decodeFilters("bogus:is:x|page:drop:x"), []);
 });
+
+test("rate limits: windows reset, and only failures block logins", async () => {
+  const { allow, blocked, recordFailure } = await import("./rate-limit.ts");
+  assert.ok(allow("k", 2, 1000, 0) && allow("k", 2, 1000, 1));
+  assert.ok(!allow("k", 2, 1000, 2));
+  assert.ok(allow("k", 2, 1000, 1001), "new window");
+  for (let i = 0; i < 3; i++) recordFailure("f", 1000, 10);
+  assert.ok(blocked("f", 3, 11));
+  assert.ok(!blocked("f", 3, 2000));
+});

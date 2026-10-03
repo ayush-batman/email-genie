@@ -36,7 +36,7 @@ export function AuthForm({ mode, action, next = "", email = "", note }: { mode: 
               <input className="input h-10" id="email" name="email" type="email" required autoComplete="email" placeholder="you@company.com" defaultValue={email} />
             </div>
             <div>
-              <label className="label" htmlFor="password">Password</label>
+              <div className="flex items-baseline justify-between"><label className="label" htmlFor="password">Password</label>{!signup && <Link href="/forgot-password" className="text-xs text-accent hover:underline">Forgot password?</Link>}</div>
               <input className="input h-10" id="password" name="password" type="password" required minLength={8} autoComplete={signup ? "new-password" : "current-password"} placeholder={signup ? "At least 8 characters" : ""} />
             </div>
             {state?.error && <p role="alert" className="rounded-lg bg-bad-soft px-3 py-2 text-sm text-bad">{state.error}</p>}
